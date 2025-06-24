@@ -1,0 +1,9 @@
+streamlit
+requests
+beautifulsoup4
+groq
+speechrecognition
+audio_recorder_streamlit
+elevenlabs
+scrapegraphai
+playwright
