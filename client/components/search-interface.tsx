@@ -2,21 +2,21 @@
 "use client"
 
 import type React from "react"
-
 import { useState, useRef, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Loader2, Search, Globe, MessageCircle, Sparkles, AlertCircle } from "lucide-react"
+import { Loader2, Search, Globe, MessageCircle, Sparkles, AlertCircle, ArrowLeft } from "lucide-react"
 import { cn } from "@/lib/utils"
+import Link from "next/link"
 
 interface Message {
   role: "user" | "assistant"
   content: string
 }
 
-export default function ProductFinder() {
+export function SearchInterface() {
   const [url, setUrl] = useState("")
   const [query, setQuery] = useState("")
   const [messages, setMessages] = useState<Message[]>([])
@@ -33,7 +33,7 @@ export default function ProductFinder() {
     setMessages([
       {
         role: "assistant",
-        content: `Great! I'm ready to help you find products from ${url}. What are you looking for?`,
+        content: `Perfect! I'm ready to help you find products from ${new URL(url).hostname}. What are you looking for?`,
       },
     ])
     setError(null)
@@ -49,12 +49,10 @@ export default function ProductFinder() {
     setQuery("")
     setError(null)
 
-    // Cancel previous request if exists
     if (abortControllerRef.current) {
       abortControllerRef.current.abort()
     }
 
-    // Create new abort controller
     abortControllerRef.current = new AbortController()
 
     try {
@@ -106,8 +104,7 @@ export default function ProductFinder() {
     }
   }
 
-  const resetChat = () => {
-    // Cancel any ongoing request
+  const resetSearch = () => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort()
     }
@@ -120,7 +117,6 @@ export default function ProductFinder() {
     setLoading(false)
   }
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       if (abortControllerRef.current) {
@@ -134,20 +130,30 @@ export default function ProductFinder() {
       <div className="w-full max-w-4xl">
         {/* Header */}
         <div className="text-center mb-8">
+          <Link
+            href="/"
+            className="inline-flex items-center gap-2 mb-4 text-muted-foreground hover:text-primary transition-colors"
+          >
+            <ArrowLeft className="w-4 h-4" />
+            Back to Home
+          </Link>
+
           <div className="inline-flex items-center gap-2 mb-4">
-            <div className="p-3 rounded-full bg-gradient-to-r from-orange-500 to-red-500 shadow-lg shadow-orange-500/25 glow-orange">
+            <div className="p-3 rounded-full gradient-primary glow-primary animate-pulse-glow">
               <Search className="w-6 h-6 text-white" />
             </div>
-            <h1 className="text-4xl font-bold text-gradient-orange">AI Product Finder</h1>
+            <h1 className="text-4xl font-bold text-gradient-primary">AI Product Search</h1>
           </div>
-          <p className="text-gray-400 text-lg">Discover products from any website using AI-powered search</p>
+          <p className="text-gray-600 dark:text-gray-400 text-lg">
+            Discover products from any website using intelligent AI search
+          </p>
         </div>
 
         {/* Error Display */}
         {error && (
-          <Card className="mb-6 bg-red-900/20 border-red-500/30">
+          <Card className="mb-6 glass-card border-destructive/30">
             <CardContent className="p-4">
-              <div className="flex items-center gap-2 text-red-400">
+              <div className="flex items-center gap-2 text-destructive">
                 <AlertCircle className="w-4 h-4" />
                 <span className="text-sm">{error}</span>
               </div>
@@ -157,30 +163,31 @@ export default function ProductFinder() {
 
         {currentStep === "url" ? (
           /* URL Input Step */
-          <Card className="backdrop-orange border-glow-orange">
+          <Card className="glass-card glow-primary hover-lift">
             <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-white">
-                <Globe className="w-5 h-5 text-orange-400" />
+              <CardTitle className="flex items-center gap-2">
+                <Globe className="w-5 h-5 text-primary" />
                 Enter Website URL
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <form onSubmit={handleUrlSubmit} className="space-y-4">
+              <form onSubmit={handleUrlSubmit} className="space-y-6">
                 <div className="relative">
                   <Input
                     type="url"
                     placeholder="https://example-store.com"
                     value={url}
                     onChange={(e) => setUrl(e.target.value)}
-                    className="border-glow-orange bg-black/50 text-white placeholder-gray-500"
+                    className="glass-card text-lg py-6 px-4 border-primary/30 focus:border-primary focus:ring-primary/20"
                     required
                   />
                 </div>
                 <Button
                   type="submit"
-                  className="w-full bg-gradient-to-r from-orange-500 to-red-500 hover:from-orange-600 hover:to-red-600 text-white glow-orange"
+                  size="lg"
+                  className="w-full gradient-primary glow-primary hover-lift text-lg py-6"
                 >
-                  <Sparkles className="w-4 h-4 mr-2" />
+                  <Sparkles className="w-5 h-5 mr-2" />
                   Start Product Search
                 </Button>
               </form>
@@ -191,23 +198,24 @@ export default function ProductFinder() {
           <div className="space-y-6">
             {/* Website Badge */}
             <div className="flex items-center justify-between">
-              <Badge variant="outline" className="border-orange-500/30 text-orange-400 bg-orange-500/10">
-                <Globe className="w-3 h-3 mr-1" />
+              <Badge variant="outline" className="glass-card border-primary/30 text-primary px-4 py-2">
+                <Globe className="w-4 h-4 mr-2" />
                 {new URL(url).hostname}
               </Badge>
               <Button
                 variant="outline"
                 size="sm"
-                onClick={resetChat}
-                className="border-orange-500/30 text-orange-400 hover:bg-orange-500/10"
+                onClick={resetSearch}
+                className="glass-card hover-lift"
                 disabled={loading}
               >
+                <ArrowLeft className="w-4 h-4 mr-2" />
                 Change Website
               </Button>
             </div>
 
             {/* Chat Messages */}
-            <Card className="backdrop-orange border-glow-orange">
+            <Card className="glass-card glow-primary">
               <CardContent className="p-6">
                 <div className="space-y-4 max-h-96 overflow-y-auto">
                   {messages.map((message, index) => (
@@ -217,15 +225,15 @@ export default function ProductFinder() {
                     >
                       <div
                         className={cn(
-                          "max-w-[80%] p-3 rounded-lg",
+                          "max-w-[80%] p-4 rounded-xl",
                           message.role === "user"
-                            ? "bg-gradient-to-r from-orange-500 to-red-500 text-white glow-orange"
-                            : "bg-gray-800/50 text-gray-100 border border-gray-700/50",
+                            ? "gradient-primary text-white glow-primary"
+                            : "glass-card border-primary/20",
                         )}
                       >
                         <div className="flex items-start gap-2">
                           {message.role === "assistant" && (
-                            <MessageCircle className="w-4 h-4 text-orange-400 mt-0.5 flex-shrink-0" />
+                            <MessageCircle className="w-4 h-4 text-primary mt-0.5 flex-shrink-0" />
                           )}
                           <p className="text-sm leading-relaxed whitespace-pre-wrap">{message.content}</p>
                         </div>
@@ -234,9 +242,9 @@ export default function ProductFinder() {
                   ))}
                   {loading && (
                     <div className="flex justify-start">
-                      <div className="bg-gray-800/50 text-gray-100 border border-gray-700/50 p-3 rounded-lg">
+                      <div className="glass-card border-primary/20 p-4 rounded-xl">
                         <div className="flex items-center gap-2">
-                          <Loader2 className="w-4 h-4 text-orange-400 animate-spin" />
+                          <Loader2 className="w-4 h-4 text-primary animate-spin" />
                           <span className="text-sm">Searching for products...</span>
                         </div>
                       </div>
@@ -247,20 +255,20 @@ export default function ProductFinder() {
             </Card>
 
             {/* Query Input */}
-            <Card className="backdrop-orange border-glow-orange">
+            <Card className="glass-card">
               <CardContent className="p-4">
-                <form onSubmit={handleQuerySubmit} className="flex gap-2">
+                <form onSubmit={handleQuerySubmit} className="flex gap-3">
                   <Input
                     placeholder="What products are you looking for?"
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
-                    className="border-glow-orange bg-black/50 text-white placeholder-gray-500"
+                    className="glass-card border-primary/30 focus:border-primary focus:ring-primary/20"
                     disabled={loading}
                   />
                   <Button
                     type="submit"
                     disabled={loading || !query.trim()}
-                    className="bg-gradient-to-r from-orange-500 to-red-500 hover:from-orange-600 hover:to-red-600 text-white glow-orange"
+                    className="gradient-primary glow-primary hover-lift px-6"
                   >
                     {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
                   </Button>
