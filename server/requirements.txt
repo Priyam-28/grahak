@@ -14,3 +14,4 @@ requests
 langchain-ollama
 langchain-core
 python-multipart
+murf

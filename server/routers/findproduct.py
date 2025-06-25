@@ -1,12 +1,14 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional
 import asyncio
 import json
 import logging
+import base64
 from utils.scraper import scrape_website, extract_body_content, clean_body_content, split_dom_content
 from utils.parser import parse_with_ollama
+from utils.tts import tts_service
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -28,50 +30,38 @@ class ChatRequest(BaseModel):
     messages: List[ChatMessage]
     url: str
     query: str
+    voice_enabled: Optional[bool] = False
+    voice_id: Optional[str] = "en-US-terrell"
+
+class TTSRequest(BaseModel):
+    text: str
+    voice_id: Optional[str] = "en-US-terrell"
 
 async def safe_scrape_and_parse(url: str, query: str):
-    """Safely scrape and parse with improved error handling and longer timeouts"""
+    """Safely scrape and parse with error handling"""
     try:
-        logger.info(f"Starting scrape for URL: {url}")
-        
-        # Increased timeout for scraping
+        # Add timeout to prevent hanging
         html_content = await asyncio.wait_for(
             asyncio.to_thread(scrape_website, url), 
-            timeout=45.0  # Increased from 30s
+            timeout=30.0
         )
         
-        logger.info("Scraping completed, extracting content...")
         body_content = extract_body_content(html_content)
         cleaned_content = clean_body_content(body_content)
         
         if not cleaned_content.strip():
             return "No content found on the website."
         
-        logger.info(f"Content extracted, splitting into chunks...")
         dom_chunks = split_dom_content(cleaned_content)
-        logger.info(f"Split into {len(dom_chunks)} chunks, starting AI parsing...")
-        
-        # Significantly increased timeout for AI parsing
         parsed_result = await asyncio.wait_for(
             asyncio.to_thread(parse_with_ollama, dom_chunks, query),
-            timeout=180.0  # Increased from 60s to 3 minutes
+            timeout=60.0
         )
         
-        logger.info("AI parsing completed")
-        
-        # Clean up the result
-        if isinstance(parsed_result, str):
-            cleaned_result = parsed_result.strip()
-            if cleaned_result:
-                return cleaned_result
-            else:
-                return "No relevant products found."
-        else:
-            return str(parsed_result) if parsed_result else "No relevant products found."
+        return parsed_result if parsed_result.strip() else "No relevant products found."
         
     except asyncio.TimeoutError:
-        logger.error("Request timed out")
-        return "Request timed out. The website might be too large or slow. Please try with a more specific query."
+        return "Request timed out. Please try again with a simpler query."
     except Exception as e:
         logger.error(f"Error in scrape_and_parse: {str(e)}")
         return f"Error processing request: {str(e)}"
@@ -82,7 +72,7 @@ async def scrape_url(request: ScrapeRequest):
     try:
         html_content = await asyncio.wait_for(
             asyncio.to_thread(scrape_website, request.url),
-            timeout=45.0  # Increased timeout
+            timeout=30.0
         )
         body_content = extract_body_content(html_content)
         cleaned_content = clean_body_content(body_content)
@@ -93,7 +83,7 @@ async def scrape_url(request: ScrapeRequest):
             "message": "Website scraped successfully"
         }
     except asyncio.TimeoutError:
-        raise HTTPException(status_code=408, detail="Request timeout - website took too long to respond")
+        raise HTTPException(status_code=408, detail="Request timeout")
     except Exception as e:
         logger.error(f"Error scraping website: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error scraping website: {str(e)}")
@@ -102,7 +92,6 @@ async def scrape_url(request: ScrapeRequest):
 async def parse_content(request: ParseRequest):
     """Scrape website and parse for specific products"""
     try:
-        logger.info(f"Parse request received for URL: {request.url}")
         result = await safe_scrape_and_parse(request.url, request.query)
         
         return {
@@ -116,22 +105,33 @@ async def parse_content(request: ParseRequest):
 
 @router.post("/chat")
 async def chat_with_products(request: ChatRequest):
-    """Chat interface for finding products with improved connection handling"""
+    """Chat interface for finding products with optional TTS"""
     try:
         # Validate input
         if not request.url or not request.query:
             raise HTTPException(status_code=400, detail="URL and query are required")
         
-        logger.info(f"Chat request received for URL: {request.url} with query: {request.query}")
-        
-        # Process the request with longer timeout
+        # Process the request with timeout
         result = await safe_scrape_and_parse(request.url, request.query)
         
-        return {
+        response_data = {
             "success": True,
             "response": result,
             "message": "Products found successfully"
         }
+        
+        # Generate TTS if requested
+        if request.voice_enabled and result:
+            try:
+                audio_base64 = tts_service.generate_speech(result, request.voice_id)
+                if audio_base64:
+                    response_data["audio"] = audio_base64
+                    response_data["audio_format"] = "mp3"
+            except Exception as e:
+                logger.error(f"TTS generation failed: {e}")
+                # Don't fail the entire request if TTS fails
+        
+        return response_data
         
     except asyncio.CancelledError:
         # Handle client disconnection gracefully
@@ -145,54 +145,94 @@ async def chat_with_products(request: ChatRequest):
         logger.error(f"Error in chat: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error in chat: {str(e)}")
 
+@router.post("/tts")
+async def generate_tts(request: TTSRequest):
+    """Generate text-to-speech audio"""
+    try:
+        if not request.text.strip():
+            raise HTTPException(status_code=400, detail="Text is required")
+        
+        audio_base64 = tts_service.generate_speech(request.text, request.voice_id)
+        
+        if not audio_base64:
+            raise HTTPException(status_code=500, detail="Failed to generate audio")
+        
+        return {
+            "success": True,
+            "audio": audio_base64,
+            "audio_format": "mp3",
+            "message": "Audio generated successfully"
+        }
+    except Exception as e:
+        logger.error(f"Error generating TTS: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error generating TTS: {str(e)}")
+
+@router.get("/voices")
+async def get_voices():
+    """Get available TTS voices"""
+    try:
+        voices = tts_service.get_available_voices()
+        return {
+            "success": True,
+            "voices": voices,
+            "message": "Voices retrieved successfully"
+        }
+    except Exception as e:
+        logger.error(f"Error getting voices: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error getting voices: {str(e)}")
+
 @router.post("/chat-stream")
 async def chat_stream(request: ChatRequest):
-    """Streaming chat response to handle long operations with progress updates"""
+    """Streaming chat response to handle long operations"""
     async def generate_response():
         try:
-            yield f"data: {json.dumps({'status': 'processing', 'message': 'Starting website scrape...'})}\n\n"
+            yield f"data: {json.dumps({'status': 'processing', 'message': 'Scraping website...'})}\n\n"
             
-            # Scrape website with progress updates
+            # Scrape website
             html_content = await asyncio.wait_for(
                 asyncio.to_thread(scrape_website, request.url),
-                timeout=45.0
+                timeout=30.0
             )
             
-            yield f"data: {json.dumps({'status': 'processing', 'message': 'Website scraped successfully, extracting content...'})}\n\n"
+            yield f"data: {json.dumps({'status': 'processing', 'message': 'Extracting content...'})}\n\n"
             
             body_content = extract_body_content(html_content)
             cleaned_content = clean_body_content(body_content)
             
-            yield f"data: {json.dumps({'status': 'processing', 'message': 'Content extracted, preparing for AI analysis...'})}\n\n"
+            yield f"data: {json.dumps({'status': 'processing', 'message': 'Analyzing products...'})}\n\n"
             
             dom_chunks = split_dom_content(cleaned_content)
-            
-            yield f"data: {json.dumps({'status': 'processing', 'message': f'Content split into {len(dom_chunks)} chunks, starting AI analysis...'})}\n\n"
-            
-            # Process with AI
             parsed_result = await asyncio.wait_for(
                 asyncio.to_thread(parse_with_ollama, dom_chunks, request.query),
-                timeout=180.0
+                timeout=60.0
             )
             
-            yield f"data: {json.dumps({'status': 'complete', 'response': parsed_result})}\n\n"
+            response_data = {'status': 'complete', 'response': parsed_result}
             
-        except asyncio.TimeoutError:
-            yield f"data: {json.dumps({'status': 'error', 'message': 'Request timed out. Website might be too large or slow.'})}\n\n"
+            # Generate TTS if requested
+            if request.voice_enabled and parsed_result:
+                yield f"data: {json.dumps({'status': 'processing', 'message': 'Generating audio...'})}\n\n"
+                try:
+                    audio_base64 = tts_service.generate_speech(parsed_result, request.voice_id)
+                    if audio_base64:
+                        response_data["audio"] = audio_base64
+                        response_data["audio_format"] = "mp3"
+                except Exception as e:
+                    logger.error(f"TTS generation failed: {e}")
+            
+            yield f"data: {json.dumps(response_data)}\n\n"
+            
         except asyncio.CancelledError:
-            yield f"data: {json.dumps({'status': 'cancelled', 'message': 'Request cancelled by client'})}\n\n"
+            yield f"data: {json.dumps({'status': 'cancelled', 'message': 'Request cancelled'})}\n\n"
         except Exception as e:
-            logger.error(f"Error in streaming: {str(e)}")
-            yield f"data: {json.dumps({'status': 'error', 'message': f'Error: {str(e)}'})}\n\n"
+            yield f"data: {json.dumps({'status': 'error', 'message': str(e)})}\n\n"
     
     return StreamingResponse(
         generate_response(),
-        media_type="text/event-stream",
+        media_type="text/plain",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "Content-Type": "text/event-stream",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "*"
+            "Content-Type": "text/event-stream"
         }
     )

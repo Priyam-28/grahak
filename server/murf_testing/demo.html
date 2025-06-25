@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API Key Setup Guide</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .guide-container {
+            max-width: 1000px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 28px;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            font-size: 16px;
+            opacity: 0.9;
+        }
+
+        .content {
+            padding: 40px;
+        }
+
+        .step {
+            margin-bottom: 40px;
+            padding: 30px;
+            border: 2px solid #e9ecef;
+            border-radius: 15px;
+            transition: all 0.3s ease;
+        }
+
+        .step:hover {
+            border-color: #667eea;
+            box-shadow: 0 10px 30px rgba(102, 126, 234, 0.1);
+        }
+
+        .step-number {
+            display: inline-block;
+            width: 40px;
+            height: 40px;
+            background: #667eea;
+            color: white;
+            border-radius: 50%;
+            text-align: center;
+            line-height: 40px;
+            font-weight: bold;
+            margin-bottom: 20px;
+        }
+
+        .step h3 {
+            color: #333;
+            margin-bottom: 15px;
+            font-size: 22px;
+        }
+
+        .step p {
+            color: #666;
+            line-height: 1.6;
+            margin-bottom: 15px;
+        }
+
+        .api-demo {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 10px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+
+        .mock-input {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+            margin: 10px 0;
+            font-family: monospace;
+            background: white;
+        }
+
+        .mock-input.murf {
+            border-left: 4px solid #28a745;
+        }
+
+        .mock-input.gemini {
+            border-left: 4px solid #4285f4;
+        }
+
+        .highlight {
+            background: #fff3cd;
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #ffc107;
+            margin: 15px 0;
+        }
+
+        .warning {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #dc3545;
+            margin: 15px 0;
+        }
+
+        .success {
+            background: #d4edda;
+            color: #155724;
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #28a745;
+            margin: 15px 0;
+        }
+
+        .code-block {
+            background: #2d3748;
+            color: #e2e8f0;
+            padding: 20px;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            margin: 15px 0;
+            overflow-x: auto;
+        }
+
+        .url {
+            color: #007bff;
+            text-decoration: none;
+            font-weight: bold;
+        }
+
+        .url:hover {
+            text-decoration: underline;
+        }
+
+        .visual-guide {
+            border: 2px dashed #667eea;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+            text-align: center;
+            background: #f8f9ff;
+        }
+
+        .mock-interface {
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 10px;
+            padding: 20px;
+            margin: 20px 0;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+
+        .controls-demo {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+            padding: 20px;
+            background: #f8f9fa;
+            border-top: 1px solid #dee2e6;
+            border-radius: 0 0 10px 10px;
+        }
+
+        .mic-button-demo {
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            border: none;
+            background: #28a745;
+            color: white;
+            font-size: 24px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .api-config-demo {
+            display: flex;
+            gap: 10px;
+            flex: 1;
+            flex-wrap: wrap;
+        }
+
+        .input-demo {
+            flex: 1;
+            min-width: 200px;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+
+        .arrow {
+            font-size: 24px;
+            color: #667eea;
+            margin: 10px 0;
+        }
+
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin: 30px 0;
+        }
+
+        .feature-card {
+            background: #f8f9fa;
+            padding: 25px;
+            border-radius: 10px;
+            border-left: 4px solid #667eea;
+        }
+
+        .feature-card h4 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 18px;
+        }
+
+        .feature-card p {
+            color: #666;
+            line-height: 1.5;
+        }
+    </style>
+</head>
+<body>
+    <div class="guide-container">
+        <div class="header">
+            <h1>🔑 API Key Setup Guide</h1>
+            <p>Complete step-by-step guide to configure your voice chat application</p>
+        </div>
+
+        <div class="content">
+            <!-- Step 1: Visual Location -->
+            <div class="step">
+                <div class="step-number">1</div>
+                <h3>📍 Where to Find the API Key Fields</h3>
+                <p>The API key input fields are located at the bottom of the voice chat interface, in the controls section:</p>
+                
+                <div class="visual-guide">
+                    <h4>🎯 Look for this section in your app:</h4>
+                    <div class="mock-interface">
+                        <div style="height: 200px; background: #f8f9fa; border-radius: 10px; display: flex; align-items: center; justify-content: center; color: #666; margin-bottom: 20px;">
+                            📱 Chat Messages Area
+                        </div>
+                        <div class="controls-demo">
+                            <div class="mic-button-demo">🎤</div>
+                            <div class="api-config-demo">
+                                <input type="password" class="input-demo" placeholder="Murf API Key" style="border-left: 4px solid #28a745;">
+                                <input type="password" class="input-demo" placeholder="Google Gemini API Key" style="border-left: 4px solid #4285f4;">
+                                <select class="input-demo" style="min-width: 150px;">
+                                    <option>Voice Selection</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="arrow">⬆️</div>
+                    <strong>Enter your API keys in these two password fields</strong>
+                </div>
+            </div>
+
+            <!-- Step 2: Get Murf API Key -->
+            <div class="step">
+                <div class="step-number">2</div>
+                <h3>🎵 Get Your Murf API Key</h3>
+                <p>Murf provides high-quality text-to-speech voices for your application.</p>
+                
+                <div class="highlight">
+                    <strong>📋 Steps to get Murf API Key:</strong>
+                    <ol style="margin: 10px 0; padding-left: 20px;">
+                        <li>Visit <a href="https://murf.ai" class="url" target="_blank">murf.ai</a></li>
+                        <li>Sign up for an account or log in</li>
+                        <li>Go to your Dashboard</li>
+                        <li>Navigate to "API" or "Developer" section</li>
+                        <li>Generate or copy your API key</li>
+                    </ol>
+                </div>
+
+                <div class="api-demo">
+                    <strong>Example Murf API Key format:</strong>
+                    <input type="text" class="mock-input murf" value="murf_api_key_1234567890abcdef..." readonly>
+                    <small>✅ Paste this into the first field (Murf API Key)</small>
+                </div>
+
+                <div class="warning">
+                    <strong>⚠️ Important:</strong> Murf is a paid service. Check their pricing at <a href="https://murf.ai/pricing" class="url">murf.ai/pricing</a>
+                </div>
+            </div>
+
+            <!-- Step 3: Get Gemini API Key -->
+            <div class="step">
+                <div class="step-number">3</div>
+                <h3>🤖 Get Your Google Gemini API Key</h3>
+                <p>Google Gemini provides the AI conversation capabilities for your voice chat.</p>
+                
+                <div class="highlight">
+                    <strong>📋 Steps to get Gemini API Key:</strong>
+                    <ol style="margin: 10px 0; padding-left: 20px;">
+                        <li>Visit <a href="https://makersuite.google.com/app/apikey" class="url" target="_blank">Google AI Studio</a></li>
+                        <li>Sign in with your Google account</li>
+                        <li>Click "Create API Key"</li>
+                        <li>Choose "Create API key in new project" or select existing project</li>
+                        <li>Copy the generated API key</li>
+                    </ol>
+                </div>
+
+                <div class="api-demo">
+                    <strong>Example Gemini API Key format:</strong>
+                    <input type="text" class="mock-input gemini" value="AIzaSyC1234567890abcdefghijklmnopqrstuvwx..." readonly>
+                    <small>✅ Paste this into the second field (Google Gemini API Key)</small>
+                </div>
+
+                <div class="success">
+                    <strong>💰 Good News:</strong> Gemini has a generous free tier! Check limits at <a href="https://ai.google.dev/pricing" class="url">ai.google.dev/pricing</a>
+                </div>
+            </div>
+
+            <!-- Step 4: Input Keys -->
+            <div class="step">
+                <div class="step-number">4</div>
+                <h3>⌨️ How to Input Your API Keys</h3>
+                <p>Once you have both API keys, here's exactly how to enter them:</p>
+                
+                <div class="feature-grid">
+                    <div class="feature-card">
+                        <h4>🔐 Security Features</h4>
+                        <p>• Fields are password-type (hidden text)<br>
+                        • Keys are stored locally in browser<br>
+                        • Automatically saved when you type</p>
+                    </div>
+                    <div class="feature-card">
+                        <h4>💾 Auto-Save</h4>
+                        <p>• Keys are saved as you type<br>
+                        • Persist between browser sessions<br>
+                        • No need to re-enter each time</p>
+                    </div>
+                </div>
+
+                <div class="code-block">
+1. Open the voice chat application
+2. Scroll to bottom controls section
+3. Click in "Murf API Key" field
+4. Paste your Murf API key
+5. Click in "Google Gemini API Key" field  
+6. Paste your Gemini API key
+7. Keys are automatically saved!
+                </div>
+            </div>
+
+            <!-- Step 5: Test -->
+            <div class="step">
+                <div class="step-number">5</div>
+                <h3>🧪 Test Your Setup</h3>
+                <p>After entering both API keys, test your voice chat:</p>
+                
+                <div class="highlight">
+                    <strong>🔍 Testing Steps:</strong>
+                    <ol style="margin: 10px 0; padding-left: 20px;">
+                        <li>Ensure both API keys are entered</li>
+                        <li>Click the microphone button (🎤)</li>
+                        <li>Allow microphone access when prompted</li>
+                        <li>Speak a simple message like "Hello, can you hear me?"</li>
+                        <li>Click microphone again to stop recording</li>
+                        <li>Wait for AI response with voice output</li>
+                    </ol>
+                </div>
+
+                <div class="success">
+                    <strong>✅ Success Indicators:</strong><br>
+                    • Status shows "Recording..." when mic is active<br>
+                    • Your speech appears as text in chat<br>
+                    • AI response appears in chat<br>
+                    • You hear the AI response as voice
+                </div>
+
+                <div class="warning">
+                    <strong>🚨 Troubleshooting:</strong><br>
+                    • Check browser microphone permissions<br>
+                    • Verify API keys are correct<br>
+                    • Ensure internet connection<br>
+                    • Use Chrome/Edge for best compatibility
+                </div>
+            </div>
+
+            <!-- Bonus: API Key Management -->
+            <div class="step">
+                <div class="step-number">💡</div>
+                <h3>🛡️ API Key Security Best Practices</h3>
+                
+                <div class="feature-grid">
+                    <div class="feature-card">
+                        <h4>🔒 Keep Keys Secure</h4>
+                        <p>• Never share API keys publicly<br>
+                        • Don't commit keys to code repositories<br>
+                        • Regularly rotate keys if compromised</p>
+                    </div>
+                    <div class="feature-card">
+                        <h4>💸 Monitor Usage</h4>
+                        <p>• Check API usage in provider dashboards<br>
+                        • Set up billing alerts<br>
+                        • Monitor for unexpected usage spikes</p>
+                    </div>
+                    <div class="feature-card">
+                        <h4>🔄 Key Management</h4>
+                        <p>• Regenerate keys if needed<br>
+                        • Use different keys for dev/production<br>
+                        • Delete unused keys from accounts</p>
+                    </div>
+                    <div class="feature-card">
+                        <h4>🌐 Browser Storage</h4>
+                        <p>• Keys stored in localStorage<br>
+                        • Clear browser data to remove keys<br>
+                        • Keys don't sync across devices</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
