@@ -7,3 +7,10 @@ audio_recorder_streamlit
 elevenlabs
 scrapegraphai
 playwright
+fastapi
+uvicorn
+pydantic
+requests
+langchain-ollama
+langchain-core
+python-multipart
