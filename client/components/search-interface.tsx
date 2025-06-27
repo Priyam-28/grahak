@@ -10,10 +10,15 @@ import { Badge } from "@/components/ui/badge"
 import { Loader2, Search, Globe, MessageCircle, Sparkles, AlertCircle, ArrowLeft } from "lucide-react"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
+import { VoiceInput } from "@/components/voice-input"
+
+import { VoiceSettings } from "@/components/voice-setting"
+import { AudioPlayer } from "./audio-player"
 
 interface Message {
   role: "user" | "assistant"
   content: string
+  audio?: string
 }
 
 export function SearchInterface() {
@@ -23,6 +28,9 @@ export function SearchInterface() {
   const [loading, setLoading] = useState(false)
   const [currentStep, setCurrentStep] = useState<"url" | "chat">("url")
   const [error, setError] = useState<string | null>(null)
+  const [voiceEnabled, setVoiceEnabled] = useState(false)
+  const [selectedVoice, setSelectedVoice] = useState("en-US-terrell")
+  const [showVoiceSettings, setShowVoiceSettings] = useState(false)
   const abortControllerRef = useRef<AbortController | null>(null)
 
   const handleUrlSubmit = async (e: React.FormEvent) => {
@@ -37,6 +45,10 @@ export function SearchInterface() {
       },
     ])
     setError(null)
+  }
+
+  const handleVoiceTranscript = (transcript: string) => {
+    setQuery(transcript)
   }
 
   const handleQuerySubmit = async (e: React.FormEvent) => {
@@ -65,6 +77,8 @@ export function SearchInterface() {
           messages: [...messages, userMessage],
           url,
           query: query,
+          voice_enabled: voiceEnabled,
+          voice_id: selectedVoice,
         }),
         signal: abortControllerRef.current.signal,
       })
@@ -79,6 +93,7 @@ export function SearchInterface() {
         const assistantMessage: Message = {
           role: "assistant",
           content: data.response || "No products found matching your criteria.",
+          audio: data.audio || undefined,
         }
         setMessages((prev) => [...prev, assistantMessage])
       } else {
@@ -145,9 +160,32 @@ export function SearchInterface() {
             <h1 className="text-4xl font-bold text-gradient-primary">AI Product Search</h1>
           </div>
           <p className="text-gray-600 dark:text-gray-400 text-lg">
-            Discover products from any website using intelligent AI search
+            Discover products from any website using intelligent AI search with voice support
           </p>
         </div>
+
+        {/* Voice Settings */}
+        {currentStep === "chat" && (
+          <div className="mb-6">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setShowVoiceSettings(!showVoiceSettings)}
+              className="glass-card mb-4"
+            >
+              Voice Settings
+            </Button>
+            {showVoiceSettings && (
+              <VoiceSettings
+                voiceEnabled={voiceEnabled}
+                onVoiceEnabledChange={setVoiceEnabled}
+                selectedVoice={selectedVoice}
+                onVoiceChange={setSelectedVoice}
+                className="mb-4"
+              />
+            )}
+          </div>
+        )}
 
         {/* Error Display */}
         {error && (
@@ -235,7 +273,10 @@ export function SearchInterface() {
                           {message.role === "assistant" && (
                             <MessageCircle className="w-4 h-4 text-primary mt-0.5 flex-shrink-0" />
                           )}
-                          <p className="text-sm leading-relaxed whitespace-pre-wrap">{message.content}</p>
+                          <div className="flex-1">
+                            <p className="text-sm leading-relaxed whitespace-pre-wrap mb-2">{message.content}</p>
+                            {message.audio && <AudioPlayer audioBase64={message.audio} autoPlay={voiceEnabled} />}
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -245,7 +286,9 @@ export function SearchInterface() {
                       <div className="glass-card border-primary/20 p-4 rounded-xl">
                         <div className="flex items-center gap-2">
                           <Loader2 className="w-4 h-4 text-primary animate-spin" />
-                          <span className="text-sm">Searching for products...</span>
+                          <span className="text-sm">
+                            {voiceEnabled ? "Searching and generating audio..." : "Searching for products..."}
+                          </span>
                         </div>
                       </div>
                     </div>
@@ -259,11 +302,16 @@ export function SearchInterface() {
               <CardContent className="p-4">
                 <form onSubmit={handleQuerySubmit} className="flex gap-3">
                   <Input
-                    placeholder="What products are you looking for?"
+                    placeholder="What products are you looking for? (or use voice input)"
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
                     className="glass-card border-primary/30 focus:border-primary focus:ring-primary/20"
                     disabled={loading}
+                  />
+                  <VoiceInput
+                    onTranscript={handleVoiceTranscript}
+                    disabled={loading}
+                    className="glass-card border-primary/30"
                   />
                   <Button
                     type="submit"

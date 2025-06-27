@@ -15,3 +15,4 @@ langchain-ollama
 langchain-core
 python-multipart
 murf
+playwright
