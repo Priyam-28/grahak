@@ -22,33 +22,22 @@ interface Message {
 }
 
 export function SearchInterface() {
-  const [searchQuery, setSearchQuery] = useState("")
-  const [query, setQuery] = useState("")
+  // const [searchQuery, setSearchQuery] = useState("") // Removed searchQuery
+  const [query, setQuery] = useState("") // This will be the main search query
   const [messages, setMessages] = useState<Message[]>([])
   const [loading, setLoading] = useState(false)
-  const [currentStep, setCurrentStep] = useState<"search" | "chat">("search")
+  // const [currentStep, setCurrentStep] = useState<"search" | "chat">("search") // Removed currentStep, always in "chat" mode essentially
   const [error, setError] = useState<string | null>(null)
   const [voiceEnabled, setVoiceEnabled] = useState(false)
   const [selectedVoice, setSelectedVoice] = useState("en-US-terrell")
   const [showVoiceSettings, setShowVoiceSettings] = useState(false)
   const abortControllerRef = useRef<AbortController | null>(null)
+  const [currentSearchTopic, setCurrentSearchTopic] = useState<string>("") // To store the topic of the current search
 
-  const handleSearchSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!searchQuery.trim()) return
-
-    setCurrentStep("chat")
-    setMessages([
-      {
-        role: "assistant",
-        content: `Perfect! I'm ready to help you find "${searchQuery}" products. Ask me anything about these products or related items!`,
-      },
-    ])
-    setError(null)
-  }
+  // Removed handleSearchSubmit as the initial search step is gone
 
   const handleVoiceTranscript = (transcript: string) => {
-    setQuery(transcript)
+    setQuery(transcript) // Voice input directly sets the main query
   }
 
   const handleQuerySubmit = async (e: React.FormEvent) => {
@@ -56,9 +45,19 @@ export function SearchInterface() {
     if (!query.trim() || loading) return
 
     const userMessage: Message = { role: "user", content: query }
-    setMessages((prev) => [...prev, userMessage])
+    // If it's a new search topic (no messages yet, or last message was assistant), clear old messages.
+    const newSearchTopic = messages.length === 0 || messages[messages.length -1].role === "assistant"
+
+    if (newSearchTopic) {
+      setMessages([userMessage])
+      setCurrentSearchTopic(query) // Set the new search topic
+    } else {
+      setMessages((prev) => [...prev, userMessage])
+    }
+
     setLoading(true)
-    setQuery("")
+    const currentQueryForRequest = query; // store current query for the request
+    setQuery("") // Clear input field after submit
     setError(null)
 
     if (abortControllerRef.current) {
@@ -68,17 +67,19 @@ export function SearchInterface() {
     abortControllerRef.current = new AbortController()
 
     try {
+      const requestBody = {
+        messages: newSearchTopic ? [userMessage] : [...messages, userMessage], // Send only current user message if new topic
+        query: currentQueryForRequest, // Use the actual query submitted
+        voice_enabled: voiceEnabled,
+        voice_id: selectedVoice,
+      }
+
       const response = await fetch("http://localhost:8000/api/v1/findproduct/chat", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          messages: [...messages, userMessage],
-          query: searchQuery + " " + query,
-          voice_enabled: voiceEnabled,
-          voice_id: selectedVoice,
-        }),
+        body: JSON.stringify(requestBody),
         signal: abortControllerRef.current.signal,
       })
 
@@ -123,10 +124,11 @@ export function SearchInterface() {
       abortControllerRef.current.abort()
     }
 
-    setCurrentStep("search")
+    // setCurrentStep("search") // Removed, no longer switching steps
     setMessages([])
-    setSearchQuery("")
+    // setSearchQuery("") // Removed
     setQuery("")
+    setCurrentSearchTopic("") // Reset current search topic
     setError(null)
     setLoading(false)
   }
@@ -163,8 +165,8 @@ export function SearchInterface() {
           </p>
         </div>
 
-        {/* Voice Settings */}
-        {currentStep === "chat" && (
+        {/* Voice Settings - always show if messages exist (i.e., a search has been made) */}
+        {messages.length > 0 && (
           <div className="mb-6">
             <Button
               variant="outline"
@@ -198,46 +200,14 @@ export function SearchInterface() {
           </Card>
         )}
 
-        {currentStep === "search" ? (
-          /* Search Input Step */
-          <Card className="glass-card glow-primary hover-lift">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Search className="w-5 h-5 text-primary" />
-                Search for Products
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <form onSubmit={handleSearchSubmit} className="space-y-6">
-                <div className="relative">
-                  <Input
-                    type="text"
-                    placeholder="e.g., wireless headphones, laptop, smartphone"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className="glass-card text-lg py-6 px-4 border-primary/30 focus:border-primary focus:ring-primary/20"
-                    required
-                  />
-                </div>
-                <Button
-                  type="submit"
-                  size="lg"
-                  className="w-full gradient-primary glow-primary hover-lift text-lg py-6"
-                >
-                  <Sparkles className="w-5 h-5 mr-2" />
-                  Start Product Search
-                </Button>
-              </form>
-            </CardContent>
-          </Card>
-        ) : (
-          /* Chat Interface */
-          <div className="space-y-6">
-            {/* Search Query Badge */}
+        {/* Always show chat interface style */}
+        <div className="space-y-6">
+          {/* Conditional Search Topic Display and New Search Button */}
+          {messages.length > 0 && currentSearchTopic && (
             <div className="flex items-center justify-between">
               <Badge variant="outline" className="glass-card border-primary/30 text-primary px-4 py-2">
                 <Search className="w-4 h-4 mr-2" />
-                Searching for: {searchQuery}
+                Topic: {currentSearchTopic}
               </Badge>
               <Button
                 variant="outline"
@@ -250,8 +220,10 @@ export function SearchInterface() {
                 New Search
               </Button>
             </div>
+          )}
 
-            {/* Chat Messages */}
+          {/* Chat Messages Area: Only show if there are messages */}
+          {messages.length > 0 && (
             <Card className="glass-card glow-primary">
               <CardContent className="p-6">
                 <div className="space-y-4 max-h-96 overflow-y-auto">
@@ -295,35 +267,43 @@ export function SearchInterface() {
                 </div>
               </CardContent>
             </Card>
+          )}
 
-            {/* Query Input */}
-            <Card className="glass-card">
-              <CardContent className="p-4">
-                <form onSubmit={handleQuerySubmit} className="flex gap-3">
-                  <Input
-                    placeholder="Ask me about these products or search for more..."
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    className="glass-card border-primary/30 focus:border-primary focus:ring-primary/20"
-                    disabled={loading}
-                  />
-                  <VoiceInput
-                    onTranscript={handleVoiceTranscript}
-                    disabled={loading}
-                    className="glass-card border-primary/30"
-                  />
-                  <Button
-                    type="submit"
-                    disabled={loading || !query.trim()}
-                    className="gradient-primary glow-primary hover-lift px-6"
-                  >
-                    {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
-                  </Button>
-                </form>
-              </CardContent>
-            </Card>
-          </div>
-        )}
+          {/* Query Input - This is now the main search input */}
+          <Card className="glass-card">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-base"> {/* Adjusted title size */}
+                <Search className="w-5 h-5 text-primary" />
+                What product are you looking for?
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="p-4">
+              <form onSubmit={handleQuerySubmit} className="flex gap-3">
+                <Input
+                  placeholder="e.g., best wireless headphones under $100, red running shoes size 10"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  className="glass-card border-primary/30 focus:border-primary focus:ring-primary/20 text-base py-3 px-4" // Adjusted padding/text size
+                  disabled={loading}
+                  required // Make initial search query required
+                />
+                <VoiceInput
+                  onTranscript={handleVoiceTranscript}
+                  disabled={loading}
+                  className="glass-card border-primary/30"
+                />
+                <Button
+                  type="submit"
+                  disabled={loading || !query.trim()}
+                  className="gradient-primary glow-primary hover-lift px-6"
+                  size="lg" // Make button a bit larger to match input height better
+                >
+                  {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+                </Button>
+              </form>
+            </CardContent>
+          </Card>
+        </div>
       </div>
     </div>
   )

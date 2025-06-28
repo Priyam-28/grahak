@@ -17,3 +17,4 @@ murf
 crawl4ai
 fake-useragent
 serpapi
+python-dotenv
