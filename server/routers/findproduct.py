@@ -5,7 +5,9 @@ from typing import List, Optional
 import asyncio
 import json
 import logging
-from utils.scraper import search_products, scrape_website, extract_body_content, clean_body_content, split_dom_content
+# Updated import: scrape_website, extract_body_content, clean_body_content, split_dom_content are removed
+# as their functionality is either integrated into the new search_products or no longer directly used by this router.
+from utils.scraper import search_products
 from utils.parser import parse_with_ollama
 
 # Configure logging
@@ -33,13 +35,15 @@ async def safe_search_and_parse(query: str, description: str):
     try:
         logger.info(f"Starting search for query: {query}")
         
-        # Use the new search_products function
+        # Use the updated search_products function from utils.scraper
+        # It now takes platform as a comma-separated string and max_results is per platform.
+        # Let's default to 'google_shopping,amazon' and 3 results per platform.
         search_results = await asyncio.wait_for(
-            asyncio.to_thread(search_products, query, "amazon", 10), 
-            timeout=45.0  # Increased from 30s
+            asyncio.to_thread(search_products, query, "google_shopping,amazon", 3),
+            timeout=60.0  # Adjusted timeout, SerpAPI calls can take time
         )
         
-        logger.info("Search completed, processing results...")
+        logger.info(f"Search completed. Raw results length: {len(search_results)}")
         
         if not search_results or search_results.strip() == "No products found.":
             return "No products found for your search."
@@ -74,10 +78,12 @@ async def safe_search_and_parse(query: str, description: str):
 @router.post("/search")
 async def search_products_endpoint(request: SearchRequest):
     """Search for products and return cleaned content"""
+    # This endpoint might be less relevant with the new chat flow,
+    # but updating it to use the new search_products signature for consistency.
     try:
         search_results = await asyncio.wait_for(
-            asyncio.to_thread(search_products, request.query, "amazon", 10),
-            timeout=45.0  # Increased timeout
+            asyncio.to_thread(search_products, request.query, "google_shopping,amazon", 3), # Updated call
+            timeout=60.0  # Adjusted timeout
         )
         
         return {
@@ -145,10 +151,10 @@ async def chat_stream(request: ChatRequest):
         try:
             yield f"data: {json.dumps({'status': 'processing', 'message': 'Starting product search...'})}\n\n"
             
-            # Search for products with progress updates
+            # Search for products with progress updates - updated call
             search_results = await asyncio.wait_for(
-                asyncio.to_thread(search_products, request.query, "amazon", 10),
-                timeout=45.0
+                asyncio.to_thread(search_products, request.query, "google_shopping,amazon", 3), # Updated call
+                timeout=60.0 # Adjusted timeout
             )
             
             yield f"data: {json.dumps({'status': 'processing', 'message': 'Products found successfully, preparing for AI analysis...'})}\n\n"
