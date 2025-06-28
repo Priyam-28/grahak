@@ -14,11 +14,13 @@ import { VoiceInput } from "@/components/voice-input"
 
 import { VoiceSettings } from "@/components/voice-setting"
 import { AudioPlayer } from "./audio-player"
+import { ProductCard, type ProductCardData } from "./ProductCard" // Import ProductCard
 
 interface Message {
   role: "user" | "assistant"
-  content: string
+  content: string // For LLM text summary
   audio?: string
+  products?: ProductCardData[] // For structured product list
 }
 
 export function SearchInterface() {
@@ -92,12 +94,15 @@ export function SearchInterface() {
       if (data.success) {
         const assistantMessage: Message = {
           role: "assistant",
-          content: data.response || "No products found matching your criteria.",
-          audio: data.audio || undefined,
+          content: data.llm_summary || "I found some products, but couldn't generate a summary.", // Use llm_summary
+          products: data.products || [], // Store the products array
+          audio: data.audio || undefined, // Assuming audio might still be part of the response
         }
         setMessages((prev) => [...prev, assistantMessage])
       } else {
-        throw new Error(data.message || "Failed to find products")
+        // Use data.llm_summary as error message if available, else data.message
+        const serverErrorMessage = data.llm_summary || data.message || "Failed to find products";
+        throw new Error(serverErrorMessage)
       }
     } catch (error: any) {
       if (error.name === "AbortError") {
@@ -245,33 +250,42 @@ export function SearchInterface() {
                             <MessageCircle className="w-4 h-4 text-primary mt-0.5 flex-shrink-0" />
                           )}
                           <div className="flex-1">
-                            <p className="text-sm leading-relaxed whitespace-pre-wrap mb-2">{message.content}</p>
+                             <p className="text-sm leading-relaxed whitespace-pre-wrap mb-2">{message.content}</p>
                             {message.audio && <AudioPlayer audioBase64={message.audio} autoPlay={voiceEnabled} />}
                           </div>
                         </div>
                       </div>
                     </div>
-                  ))}
-                  {loading && (
-                    <div className="flex justify-start">
-                      <div className="glass-card border-primary/20 p-4 rounded-xl">
-                        <div className="flex items-center gap-2">
-                          <Loader2 className="w-4 h-4 text-primary animate-spin" />
-                          <span className="text-sm">
-                            {voiceEnabled ? "Searching and generating audio..." : "Searching for products..."}
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </CardContent>
-            </Card>
-          )}
-
-          {/* Query Input - This is now the main search input */}
-          <Card className="glass-card">
-            <CardHeader>
++                    {/* Render Product Cards if they exist for an assistant message */}
++                    {message.role === "assistant" && message.products && message.products.length > 0 && (
++                      <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 px-2 py-2 -mx-2 max-h-96 overflow-y-auto">
++                        {message.products.map((product, pIndex) => (
++                          <ProductCard key={`${index}-${pIndex}`} {...product} />
++                        ))}
++                      </div>
++                    )}
++                  </React.Fragment>
++                  ))}
++                  {loading && (
++                    <div className="flex justify-start">
++                      <div className="glass-card border-primary/20 p-4 rounded-xl">
++                        <div className="flex items-center gap-2">
++                          <Loader2 className="w-4 h-4 text-primary animate-spin" />
++                          <span className="text-sm">
++                            {voiceEnabled ? "Searching and generating audio..." : "Searching for products..."}
++                          </span>
++                        </div>
++                      </div>
++                    </div>
++                  )}
++                </div>
++              </CardContent>
++            </Card>
++          )}
++
++          {/* Query Input - This is now the main search input */}
++          <Card className="glass-card">
++            <CardHeader>
               <CardTitle className="flex items-center gap-2 text-base"> {/* Adjusted title size */}
                 <Search className="w-5 h-5 text-primary" />
                 What product are you looking for?

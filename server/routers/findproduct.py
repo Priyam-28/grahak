@@ -6,8 +6,7 @@ import asyncio
 import json
 import logging
 # Updated import: scrape_website, extract_body_content, clean_body_content, split_dom_content are removed
-# as their functionality is either integrated into the new search_products or no longer directly used by this router.
-from utils.scraper import search_products
+from utils.scraper import SerpAPIIntegration, ScraperPoolManager, ProductData, SERPAPI_API_KEY # Import necessary classes and API key
 from utils.parser import parse_with_ollama
 
 # Configure logging
@@ -15,174 +14,284 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/findproduct", tags=["findproduct"])
 
+# --- Helper function to format ProductData for LLM ---
+def format_product_data_for_llm(products: List[ProductData]) -> str:
+    if not products:
+        return "No products found."
+
+    text_parts = ["Here is a list of products found:\n"]
+    for i, p in enumerate(products):
+        text_parts.append(f"\n--- Product {i+1} ---")
+        text_parts.append(f"Title: {p.title if p.title else 'N/A'}")
+        text_parts.append(f"Price: {p.price if p.price else 'N/A'}")
+        if p.platform:
+            text_parts.append(f"Source: {p.platform}")
+        if p.description:
+            # Keep description concise for the LLM context
+            desc_snippet = (p.description[:200] + '...') if len(p.description) > 200 else p.description
+            text_parts.append(f"Description: {desc_snippet}")
+        # Not including image_url or raw_data in the text for LLM
+    return "\n".join(text_parts)
+
+# --- Pydantic Models ---
 class SearchRequest(BaseModel):
     query: str
 
-class ParseRequest(BaseModel):
+class ParseRequest(BaseModel): # Potentially deprecated if not used by new flow
     query: str
     description: str
 
 class ChatMessage(BaseModel):
-    role: str  # "user" or "assistant"
+    role: str
     content: str
 
 class ChatRequest(BaseModel):
     messages: List[ChatMessage]
-    query: str
+    query: str # The user's current query/message
 
-async def safe_search_and_parse(query: str, description: str):
-    """Safely search and parse with improved error handling and longer timeouts"""
+# --- Core Logic Function (Refactored safe_search_and_parse) ---
+async def process_product_query(user_query: str, num_urls_to_find: int = 7, max_products_to_return: int = 10):
+    """
+    Processes a user's product query:
+    1. Finds relevant e-commerce URLs using SerpAPI (general search).
+    2. Scrapes these URLs for product data.
+    3. Generates an LLM summary based on the scraped data and user query.
+    4. Returns the LLM summary and a list of structured product data.
+    """
+    if not SERPAPI_API_KEY:
+        logger.error("SERPAPI_API_KEY is not configured. Cannot process query.")
+        return {"llm_summary": "Error: API key for searching is not configured.", "products": []}
+
     try:
-        logger.info(f"Starting search for query: {query}")
+        # Step A: URL Discovery
+        logger.info(f"Step A: Discovering e-commerce links for query: '{user_query}'")
+        serp_integration = SerpAPIIntegration(api_key=SERPAPI_API_KEY)
         
-        # Use the updated search_products function from utils.scraper
-        # It now takes platform as a comma-separated string and max_results is per platform.
-        # Let's default to 'google_shopping,amazon' and 3 results per platform.
-        search_results = await asyncio.wait_for(
-            asyncio.to_thread(search_products, query, "google_shopping,amazon", 3),
-            timeout=60.0  # Adjusted timeout, SerpAPI calls can take time
+        # Run blocking I/O in a separate thread
+        ecommerce_urls = await asyncio.to_thread(
+            serp_integration.get_ecommerce_links_from_query,
+            user_query,
+            num_results=num_urls_to_find
         )
-        
-        logger.info(f"Search completed. Raw results length: {len(search_results)}")
-        
-        if not search_results or search_results.strip() == "No products found.":
-            return "No products found for your search."
-        
-        logger.info(f"Products found, starting AI parsing...")
-        
-        # Use the search results directly for AI parsing
-        parsed_result = await asyncio.wait_for(
-            asyncio.to_thread(parse_with_ollama, [search_results], description),
-            timeout=180.0  # Increased from 60s to 3 minutes
-        )
-        
-        logger.info("AI parsing completed")
-        
-        # Clean up the result
-        if isinstance(parsed_result, str):
-            cleaned_result = parsed_result.strip()
-            if cleaned_result:
-                return cleaned_result
-            else:
-                return "No relevant products found."
+
+        if not ecommerce_urls:
+            logger.warning(f"No e-commerce URLs found by SerpAPI general search for query: '{user_query}'")
+            # Fallback: Try direct Google Shopping search for some initial products
+            logger.info(f"Falling back to Google Shopping search for query: '{user_query}'")
+            shopping_results_raw = await asyncio.to_thread(serp_integration.search_google_shopping, user_query, num=max_products_to_return)
+            scraped_products = [
+                serp_integration.get_product_data_from_serpapi_result(res, "Google Shopping")
+                for res in shopping_results_raw if res
+            ]
+            # Filter out None results
+            scraped_products = [p for p in scraped_products if p]
+            if not scraped_products:
+                 return {"llm_summary": "No products found for your query after fallback search.", "products": []}
         else:
-            return str(parsed_result) if parsed_result else "No relevant products found."
-        
-    except asyncio.TimeoutError:
-        logger.error("Request timed out")
-        return "Request timed out. Please try with a more specific search query."
-    except Exception as e:
-        logger.error(f"Error in search_and_parse: {str(e)}")
-        return f"Error processing request: {str(e)}"
+            logger.info(f"Step B: Scraping {len(ecommerce_urls)} URLs: {ecommerce_urls}")
+            scraper_manager = ScraperPoolManager(serpapi_key=SERPAPI_API_KEY) # serpapi_key needed for its strategies even if not searching
+            # Run blocking I/O in a separate thread
+            scraped_products = await asyncio.to_thread(scraper_manager.scrape_urls, ecommerce_urls)
 
-@router.post("/search")
-async def search_products_endpoint(request: SearchRequest):
-    """Search for products and return cleaned content"""
-    # This endpoint might be less relevant with the new chat flow,
-    # but updating it to use the new search_products signature for consistency.
-    try:
-        search_results = await asyncio.wait_for(
-            asyncio.to_thread(search_products, request.query, "google_shopping,amazon", 3), # Updated call
-            timeout=60.0  # Adjusted timeout
+        if not scraped_products:
+            logger.warning(f"No products successfully scraped from discovered URLs for query: '{user_query}'")
+            return {"llm_summary": "Could not retrieve detailed product information from the web.", "products": []}
+
+        logger.info(f"Successfully scraped {len(scraped_products)} products.")
+
+        # Step C: Prepare Context for LLM
+        logger.info("Step C: Preparing context for LLM.")
+        llm_context_text = format_product_data_for_llm(scraped_products)
+
+        # Step D: LLM Processing
+        logger.info(f"Step D: Sending context to LLM for query: '{user_query}'")
+        # The 'description' parameter for parse_with_ollama is the user's original query.
+        llm_summary = await asyncio.wait_for(
+            asyncio.to_thread(parse_with_ollama, [llm_context_text], user_query), # Pass context as a single chunk
+            timeout=180.0
         )
-        
-        return {
-            "success": True,
-            "content": search_results[:5000],  # Limit content size
-            "message": "Product search completed successfully"
-        }
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=408, detail="Request timeout - search took too long to respond")
-    except Exception as e:
-        logger.error(f"Error searching for products: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error searching for products: {str(e)}")
+        logger.info("LLM processing completed.")
 
-@router.post("/parse")
-async def parse_content(request: ParseRequest):
-    """Search for products and parse for specific criteria"""
-    try:
-        logger.info(f"Parse request received for query: {request.query}")
-        result = await safe_search_and_parse(request.query, request.description)
+        # Step E: Format API Response (products part)
+        # Select up to max_products_to_return, prioritizing those with image_url and price
+        formatted_products = []
+        for p_data in sorted(scraped_products, key=lambda p: (bool(p.image_url and p.price), bool(p.price)), reverse=True)[:max_products_to_return]:
+            formatted_products.append({
+                "title": p_data.title,
+                "price": p_data.price,
+                "image_url": p_data.image_url,
+                "product_url": p_data.product_url,
+                "platform": p_data.platform,
+                "description": p_data.description[:150] + '...' if p_data.description and len(p_data.description) > 150 else p_data.description, # Snippet
+                "rating": p_data.rating # Added rating
+            })
         
-        return {
-            "success": True,
-            "result": result,
-            "message": "Content parsed successfully"
-        }
+        return {"llm_summary": llm_summary if llm_summary else "No specific summary generated.", "products": formatted_products}
+
+    except asyncio.TimeoutError:
+        logger.error(f"Request timed out during processing query: {user_query}")
+        return {"llm_summary": "Search process timed out. Please try a simpler query.", "products": []}
     except Exception as e:
-        logger.error(f"Error parsing content: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error parsing content: {str(e)}")
+        logger.error(f"Error in process_product_query for query '{user_query}': {e}", exc_info=True)
+        return {"llm_summary": f"An error occurred: {str(e)}", "products": []}
+
+
+# @router.post("/search") # Commenting out as it's likely deprecated by the new /chat flow
+# async def search_products_endpoint(request: SearchRequest):
+#     """Search for products and return cleaned content"""
+#     try:
+#         # This would need to be updated to use process_product_query or similar
+#         # For now, focusing on the /chat endpoint
+#         # search_results = await asyncio.wait_for(
+#         #     asyncio.to_thread(search_products, request.query, "google_shopping,amazon", 3),
+#         #     timeout=60.0
+#         # )
+#         # return {
+#         #     "success": True,
+#         #     "content": "This endpoint is under review. Please use /chat.",
+#         #     "message": "Product search completed successfully"
+#         # }
+#         raise HTTPException(status_code=501, detail="This endpoint is currently not implemented. Please use /chat.")
+#     except asyncio.TimeoutError:
+#         raise HTTPException(status_code=408, detail="Request timeout - search took too long to respond")
+#     except Exception as e:
+#         logger.error(f"Error searching for products: {str(e)}")
+#         raise HTTPException(status_code=500, detail=f"Error searching for products: {str(e)}")
+
+# @router.post("/parse") # Commenting out as it's likely deprecated by the new /chat flow
+# async def parse_content(request: ParseRequest):
+#     """Search for products and parse for specific criteria"""
+#     try:
+#         # logger.info(f"Parse request received for query: {request.query}")
+#         # result = await process_product_query(request.query) # Old safe_search_and_parse was different
+#         # return {
+#         #     "success": True,
+#         #     "result": result.get("llm_summary"), # Or adapt to new structure
+#         #     "message": "Content parsed successfully"
+#         # }
+#         raise HTTPException(status_code=501, detail="This endpoint is currently not implemented. Please use /chat.")
+#     except Exception as e:
+#         logger.error(f"Error parsing content: {str(e)}")
+#         raise HTTPException(status_code=500, detail=f"Error parsing content: {str(e)}")
 
 @router.post("/chat")
 async def chat_with_products(request: ChatRequest):
-    """Chat interface for finding products with improved connection handling"""
+    """Chat interface for finding products. Returns LLM summary and a list of products."""
     try:
-        # Validate input
         if not request.query:
             raise HTTPException(status_code=400, detail="Search query is required")
         
         logger.info(f"Chat request received for query: {request.query}")
         
-        # Process the request with longer timeout
-        result = await safe_search_and_parse(request.query, request.query)
+        processed_data = await process_product_query(request.query)
         
         return {
             "success": True,
-            "response": result,
-            "message": "Products found successfully"
+            "llm_summary": processed_data.get("llm_summary"),
+            "products": processed_data.get("products", []),
+            "message": "Products found successfully" # Or a more dynamic message
         }
         
     except asyncio.CancelledError:
         # Handle client disconnection gracefully
         logger.info("Client disconnected during processing")
-        return {
-            "success": False,
-            "response": "Request was cancelled",
-            "message": "Client disconnected"
-        }
+        # For FastAPI, if the client disconnects, the request is cancelled,
+        # and FastAPI handles sending an appropriate response or just closing the connection.
+        # We don't need to return a JSON response here if the connection is already gone.
+        # The 'except asyncio.CancelledError' handles this.
+        pass # Pass here, error is already logged.
     except Exception as e:
-        logger.error(f"Error in chat: {str(e)}")
+        logger.error(f"Error in chat: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error in chat: {str(e)}")
 
 @router.post("/chat-stream")
-async def chat_stream(request: ChatRequest):
-    """Streaming chat response to handle long operations with progress updates"""
-    async def generate_response():
+async def chat_stream_endpoint(request: ChatRequest):
+    """
+    Streaming chat response. Streams LLM summary first, then sends a final message with product list.
+    """
+    user_query = request.query
+    if not user_query:
+        # This case should ideally be caught by client-side validation too.
+        # For streaming, we can send an error event and then close.
+        async def error_stream():
+            yield f"event: error\ndata: {json.dumps({'error': 'Search query is required'})}\n\n"
+        return StreamingResponse(error_stream(), media_type="text/event-stream")
+
+    async def stream_generator():
+        # Initial status update
+        yield f"event: status\ndata: {json.dumps({'status': 'processing', 'message': 'Discovering product links...'})}\n\n"
+
+        if not SERPAPI_API_KEY:
+            logger.error("SERPAPI_API_KEY is not configured for streaming.")
+            yield f"event: llm_token\ndata: {json.dumps({'token': 'Error: API key for searching is not configured.'})}\n\n"
+            yield f"event: products\ndata: {json.dumps([])}\n\n" # Send empty products list
+            yield f"event: end\ndata: Stream ended due to configuration error.\n\n"
+            return
+
         try:
-            yield f"data: {json.dumps({'status': 'processing', 'message': 'Starting product search...'})}\n\n"
-            
-            # Search for products with progress updates - updated call
-            search_results = await asyncio.wait_for(
-                asyncio.to_thread(search_products, request.query, "google_shopping,amazon", 3), # Updated call
-                timeout=60.0 # Adjusted timeout
+            # Step A: URL Discovery (Non-streamed part, happens first)
+            serp_integration = SerpAPIIntegration(api_key=SERPAPI_API_KEY)
+            ecommerce_urls = await asyncio.to_thread(
+                serp_integration.get_ecommerce_links_from_query, user_query, num_results=7
             )
-            
-            yield f"data: {json.dumps({'status': 'processing', 'message': 'Products found successfully, preparing for AI analysis...'})}\n\n"
-            
-            if not search_results or search_results.strip() == "No products found.":
-                yield f"data: {json.dumps({'status': 'complete', 'response': 'No products found for your search.'})}\n\n"
+
+            scraped_products_data: List[ProductData] = []
+            if not ecommerce_urls:
+                logger.warning(f"No e-commerce URLs found by SerpAPI general search for query: '{user_query}'")
+                yield f"event: status\ndata: {json.dumps({'status': 'processing', 'message': 'No direct e-commerce links found, trying fallback shopping search...'})}\n\n"
+                shopping_results_raw = await asyncio.to_thread(serp_integration.search_google_shopping, user_query, num=10)
+                raw_product_objects = [
+                    serp_integration.get_product_data_from_serpapi_result(res, "Google Shopping")
+                    for res in shopping_results_raw if res
+                ]
+                scraped_products_data = [p for p in raw_product_objects if p]
+            else:
+                yield f"event: status\ndata: {json.dumps({'status': 'processing', 'message': f'Found {len(ecommerce_urls)} links, now scraping...'})}\n\n"
+                # Step B: Parallel Scraping (Non-streamed part)
+                scraper_manager = ScraperPoolManager(serpapi_key=SERPAPI_API_KEY)
+                scraped_products_data = await asyncio.to_thread(scraper_manager.scrape_urls, ecommerce_urls)
+
+            if not scraped_products_data:
+                logger.warning(f"No products successfully scraped for query: '{user_query}'")
+                yield f"event: llm_token\ndata: {json.dumps({'token': 'Could not retrieve detailed product information from the web.'})}\n\n"
+                yield f"event: products\ndata: {json.dumps([])}\n\n"
+                yield f"event: end\ndata: Stream ended, no products found.\n\n"
                 return
+
+            yield f"event: status\ndata: {json.dumps({'status': 'processing', 'message': f'Scraped {len(scraped_products_data)} products. Generating summary...'})}\n\n"
+
+            # Step C: Prepare Context for LLM
+            llm_context_text = format_product_data_for_llm(scraped_products_data)
             
-            yield f"data: {json.dumps({'status': 'processing', 'message': 'Starting AI analysis...'})}\n\n"
+            # Step D: Stream LLM Processing
+            async for token in stream_llm_summary(llm_context_text, user_query):
+                yield f"event: llm_token\ndata: {json.dumps({'token': token})}\n\n"
             
-            # Process with AI
-            parsed_result = await asyncio.wait_for(
-                asyncio.to_thread(parse_with_ollama, [search_results], request.query),
-                timeout=180.0
-            )
-            
-            yield f"data: {json.dumps({'status': 'complete', 'response': parsed_result})}\n\n"
-            
+            # Step E: Format and send product list
+            formatted_products_for_client = []
+            for p_data in sorted(scraped_products_data, key=lambda p: (bool(p.image_url and p.price), bool(p.price)), reverse=True)[:10]:
+                 formatted_products_for_client.append({
+                    "title": p_data.title, "price": p_data.price, "image_url": p_data.image_url,
+                    "product_url": p_data.product_url, "platform": p_data.platform,
+                    "description": p_data.description[:150] + '...' if p_data.description and len(p_data.description) > 150 else p_data.description,
+                    "rating": p_data.rating
+                })
+            yield f"event: products\ndata: {json.dumps(formatted_products_for_client)}\n\n"
+            yield f"event: end\ndata: Stream completed successfully.\n\n"
+
         except asyncio.TimeoutError:
-            yield f"data: {json.dumps({'status': 'error', 'message': 'Request timed out. Search might be too complex.'})}\n\n"
+            logger.error(f"Request timed out during streaming for query: {user_query}")
+            yield f"event: error\ndata: {json.dumps({'error': 'Request timed out. Search might be too complex.'})}\n\n"
         except asyncio.CancelledError:
-            yield f"data: {json.dumps({'status': 'cancelled', 'message': 'Request cancelled by client'})}\n\n"
+            logger.info(f"Client disconnected during streaming for query: {user_query}")
+            # Don't yield anything further if client disconnected.
         except Exception as e:
-            logger.error(f"Error in streaming: {str(e)}")
-            yield f"data: {json.dumps({'status': 'error', 'message': f'Error: {str(e)}'})}\n\n"
+            logger.error(f"Error in streaming for query '{user_query}': {e}", exc_info=True)
+            yield f"event: error\ndata: {json.dumps({'error': f'Error: {str(e)}'})}\n\n"
     
     return StreamingResponse(
-        generate_response(),
+        stream_generator(),
+        # generate_response(), # Corrected: Removed duplicate/old generator
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

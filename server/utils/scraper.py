@@ -295,6 +295,42 @@ class MyntraScrapingStrategy(SiteScrapingStrategy):
         return product
 
 
+class BasicScrapingStrategy(SiteScrapingStrategy):
+    """Basic scraping strategy for generic e-commerce sites."""
+    def __init__(self):
+        config = ScrapingConfig(
+            site_name="generic",
+            # No specific selectors, will try generic tags
+            delay_range=(1, 2)
+        )
+        super().__init__(config)
+
+    def extract_data(self, soup: BeautifulSoup, url: str) -> ProductData:
+        product = ProductData(platform="Unknown Ecommerce", product_url=url)
+
+        # Try to get title
+        if soup.title and soup.title.string:
+            product.title = soup.title.string.strip()
+
+        # Try to get meta description as a fallback for description
+        meta_description = soup.find("meta", attrs={"name": "description"})
+        if meta_description and meta_description.get("content"):
+            product.description = meta_description.get("content").strip()
+        else: # Fallback to first few paragraphs if no meta description
+            paragraphs = soup.find_all("p")
+            text_content = ""
+            for p in paragraphs[:3]: # Get first 3 paragraphs
+                text_content += p.get_text(strip=True) + " "
+            product.description = text_content.strip()[:500] # Limit length
+
+        # Price and image_url are unlikely to be found reliably without specific selectors
+        # product.price = ""
+        # product.image_url = ""
+
+        logger.info(f"Basic scraping for {url} extracted title: '{product.title}' and a description snippet.")
+        return product
+
+
 class SerpAPIIntegration:
     """Integration with SerpAPI for search-based scraping"""
     
@@ -326,6 +362,74 @@ class SerpAPIIntegration:
         """Search Google Shopping"""
         return self.search_products(query, engine="google_shopping", **kwargs)
 
+    def get_ecommerce_links_from_query(self, query: str, num_results: int = 10) -> List[str]:
+        """
+        Perform a general Google search and attempt to extract e-commerce product page URLs.
+        """
+        if not self.api_key:
+            logger.error("SerpAPI key not provided for general search.")
+            return []
+        try:
+            logger.info(f"Performing general Google search for query: {query} to find e-commerce links.")
+            search_params = {
+                "q": query,
+                "api_key": self.api_key,
+                "engine": "google",
+                "num": num_results * 2,  # Fetch more results to have a better chance after filtering
+            }
+            search = GoogleSearch(search_params)
+            results = search.get_dict()
+
+            organic_results = results.get("organic_results", [])
+            extracted_links = []
+
+            # Keywords and domain parts that often indicate e-commerce product pages
+            # This list can be expanded.
+            ecommerce_indicators = ["product", "item", "detail", "/p/", "/dp/"]
+            common_ecommerce_domains = [
+                "amazon.", "ebay.", "walmart.", "target.", "bestbuy.",
+                "etsy.", "flipkart.", "myntra.", "rakuten.", "newegg.",
+                "homedepot.", "lowes.", "costco."
+            ] # Add more regional ones if needed
+
+            for res in organic_results:
+                link = res.get("link")
+                title = res.get("title", "").lower()
+                snippet = res.get("snippet", "").lower()
+
+                if not link:
+                    continue
+
+                # Check 1: Domain known for e-commerce
+                is_known_ecommerce_domain = any(domain_part in link for domain_part in common_ecommerce_domains)
+
+                # Check 2: URL path/query parameters indicating product page
+                has_ecommerce_path = any(indicator in link for indicator in ecommerce_indicators)
+
+                # Check 3: Title/snippet containing terms like "buy", "price", "shop", "product"
+                # (More prone to false positives, use with caution or stricter logic)
+                # For now, prioritize domain and path structure.
+
+                if is_known_ecommerce_domain and has_ecommerce_path:
+                    if link not in extracted_links: # Avoid duplicates
+                        extracted_links.append(link)
+                        logger.debug(f"Found potential e-commerce link: {link}")
+                elif is_known_ecommerce_domain and len(extracted_links) < num_results: # If it's a known domain but path is unclear, still consider if we need more links
+                    if link not in extracted_links:
+                         extracted_links.append(link)
+                         logger.debug(f"Found link from known e-commerce domain (less specific path): {link}")
+
+
+                if len(extracted_links) >= num_results:
+                    break
+
+            logger.info(f"Extracted {len(extracted_links)} potential e-commerce links for query '{query}'.")
+            return extracted_links
+
+        except Exception as e:
+            logger.error(f"Error in get_ecommerce_links_from_query: {e}")
+            return []
+
 
 class ScraperPoolManager:
     """Main scraper pool manager"""
@@ -344,7 +448,8 @@ class ScraperPoolManager:
         self.strategies = {
             'amazon': AmazonScrapingStrategy(),
             'flipkart': FlipkartScrapingStrategy(),
-            'myntra': MyntraScrapingStrategy()
+            'myntra': MyntraScrapingStrategy(),
+            'generic': BasicScrapingStrategy() # Added BasicScrapingStrategy
         }
     
     def _detect_platform(self, url: str) -> str:
@@ -631,13 +736,13 @@ def main():
 #     """
 #     if not products:
 #         return "No products found."
-
-#     formatted_text = f"Found {len(products)} products:\n\n"
     
+#     formatted_text = f"Found {len(products)} products:\n\n"
+
 #     for i, product in enumerate(products, 1):
 #         formatted_text += f"--- Product {i} ---\n"
 #         formatted_text += f"Title: {product.title}\n"
-        
+
 #         if product.price:
 #             formatted_text += f"Price: {product.price}\n"
         
