@@ -5,7 +5,7 @@ from typing import List, Optional
 import asyncio
 import json
 import logging
-from utils.scraper import scrape_website, extract_body_content, clean_body_content, split_dom_content
+from utils.scraper import search_products, scrape_website, extract_body_content, clean_body_content, split_dom_content
 from utils.parser import parse_with_ollama
 
 # Configure logging
@@ -13,12 +13,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/findproduct", tags=["findproduct"])
 
-class ScrapeRequest(BaseModel):
-    url: str
+class SearchRequest(BaseModel):
+    query: str
 
 class ParseRequest(BaseModel):
-    url: str
     query: str
+    description: str
 
 class ChatMessage(BaseModel):
     role: str  # "user" or "assistant"
@@ -26,34 +26,29 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: List[ChatMessage]
-    url: str
     query: str
 
-async def safe_scrape_and_parse(url: str, query: str):
-    """Safely scrape and parse with improved error handling and longer timeouts"""
+async def safe_search_and_parse(query: str, description: str):
+    """Safely search and parse with improved error handling and longer timeouts"""
     try:
-        logger.info(f"Starting scrape for URL: {url}")
+        logger.info(f"Starting search for query: {query}")
         
-        # Increased timeout for scraping
-        html_content = await asyncio.wait_for(
-            asyncio.to_thread(scrape_website, url), 
+        # Use the new search_products function
+        search_results = await asyncio.wait_for(
+            asyncio.to_thread(search_products, query, "amazon", 10), 
             timeout=45.0  # Increased from 30s
         )
         
-        logger.info("Scraping completed, extracting content...")
-        body_content = extract_body_content(html_content)
-        cleaned_content = clean_body_content(body_content)
+        logger.info("Search completed, processing results...")
         
-        if not cleaned_content.strip():
-            return "No content found on the website."
+        if not search_results or search_results.strip() == "No products found.":
+            return "No products found for your search."
         
-        logger.info(f"Content extracted, splitting into chunks...")
-        dom_chunks = split_dom_content(cleaned_content)
-        logger.info(f"Split into {len(dom_chunks)} chunks, starting AI parsing...")
+        logger.info(f"Products found, starting AI parsing...")
         
-        # Significantly increased timeout for AI parsing
+        # Use the search results directly for AI parsing
         parsed_result = await asyncio.wait_for(
-            asyncio.to_thread(parse_with_ollama, dom_chunks, query),
+            asyncio.to_thread(parse_with_ollama, [search_results], description),
             timeout=180.0  # Increased from 60s to 3 minutes
         )
         
@@ -71,39 +66,37 @@ async def safe_scrape_and_parse(url: str, query: str):
         
     except asyncio.TimeoutError:
         logger.error("Request timed out")
-        return "Request timed out. The website might be too large or slow. Please try with a more specific query."
+        return "Request timed out. Please try with a more specific search query."
     except Exception as e:
-        logger.error(f"Error in scrape_and_parse: {str(e)}")
+        logger.error(f"Error in search_and_parse: {str(e)}")
         return f"Error processing request: {str(e)}"
 
-@router.post("/scrape")
-async def scrape_url(request: ScrapeRequest):
-    """Scrape a website and return cleaned content"""
+@router.post("/search")
+async def search_products_endpoint(request: SearchRequest):
+    """Search for products and return cleaned content"""
     try:
-        html_content = await asyncio.wait_for(
-            asyncio.to_thread(scrape_website, request.url),
+        search_results = await asyncio.wait_for(
+            asyncio.to_thread(search_products, request.query, "amazon", 10),
             timeout=45.0  # Increased timeout
         )
-        body_content = extract_body_content(html_content)
-        cleaned_content = clean_body_content(body_content)
         
         return {
             "success": True,
-            "content": cleaned_content[:5000],  # Limit content size
-            "message": "Website scraped successfully"
+            "content": search_results[:5000],  # Limit content size
+            "message": "Product search completed successfully"
         }
     except asyncio.TimeoutError:
-        raise HTTPException(status_code=408, detail="Request timeout - website took too long to respond")
+        raise HTTPException(status_code=408, detail="Request timeout - search took too long to respond")
     except Exception as e:
-        logger.error(f"Error scraping website: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error scraping website: {str(e)}")
+        logger.error(f"Error searching for products: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error searching for products: {str(e)}")
 
 @router.post("/parse")
 async def parse_content(request: ParseRequest):
-    """Scrape website and parse for specific products"""
+    """Search for products and parse for specific criteria"""
     try:
-        logger.info(f"Parse request received for URL: {request.url}")
-        result = await safe_scrape_and_parse(request.url, request.query)
+        logger.info(f"Parse request received for query: {request.query}")
+        result = await safe_search_and_parse(request.query, request.description)
         
         return {
             "success": True,
@@ -119,13 +112,13 @@ async def chat_with_products(request: ChatRequest):
     """Chat interface for finding products with improved connection handling"""
     try:
         # Validate input
-        if not request.url or not request.query:
-            raise HTTPException(status_code=400, detail="URL and query are required")
+        if not request.query:
+            raise HTTPException(status_code=400, detail="Search query is required")
         
-        logger.info(f"Chat request received for URL: {request.url} with query: {request.query}")
+        logger.info(f"Chat request received for query: {request.query}")
         
         # Process the request with longer timeout
-        result = await safe_scrape_and_parse(request.url, request.query)
+        result = await safe_search_and_parse(request.query, request.query)
         
         return {
             "success": True,
@@ -150,35 +143,32 @@ async def chat_stream(request: ChatRequest):
     """Streaming chat response to handle long operations with progress updates"""
     async def generate_response():
         try:
-            yield f"data: {json.dumps({'status': 'processing', 'message': 'Starting website scrape...'})}\n\n"
+            yield f"data: {json.dumps({'status': 'processing', 'message': 'Starting product search...'})}\n\n"
             
-            # Scrape website with progress updates
-            html_content = await asyncio.wait_for(
-                asyncio.to_thread(scrape_website, request.url),
+            # Search for products with progress updates
+            search_results = await asyncio.wait_for(
+                asyncio.to_thread(search_products, request.query, "amazon", 10),
                 timeout=45.0
             )
             
-            yield f"data: {json.dumps({'status': 'processing', 'message': 'Website scraped successfully, extracting content...'})}\n\n"
+            yield f"data: {json.dumps({'status': 'processing', 'message': 'Products found successfully, preparing for AI analysis...'})}\n\n"
             
-            body_content = extract_body_content(html_content)
-            cleaned_content = clean_body_content(body_content)
+            if not search_results or search_results.strip() == "No products found.":
+                yield f"data: {json.dumps({'status': 'complete', 'response': 'No products found for your search.'})}\n\n"
+                return
             
-            yield f"data: {json.dumps({'status': 'processing', 'message': 'Content extracted, preparing for AI analysis...'})}\n\n"
-            
-            dom_chunks = split_dom_content(cleaned_content)
-            
-            yield f"data: {json.dumps({'status': 'processing', 'message': f'Content split into {len(dom_chunks)} chunks, starting AI analysis...'})}\n\n"
+            yield f"data: {json.dumps({'status': 'processing', 'message': 'Starting AI analysis...'})}\n\n"
             
             # Process with AI
             parsed_result = await asyncio.wait_for(
-                asyncio.to_thread(parse_with_ollama, dom_chunks, request.query),
+                asyncio.to_thread(parse_with_ollama, [search_results], request.query),
                 timeout=180.0
             )
             
             yield f"data: {json.dumps({'status': 'complete', 'response': parsed_result})}\n\n"
             
         except asyncio.TimeoutError:
-            yield f"data: {json.dumps({'status': 'error', 'message': 'Request timed out. Website might be too large or slow.'})}\n\n"
+            yield f"data: {json.dumps({'status': 'error', 'message': 'Request timed out. Search might be too complex.'})}\n\n"
         except asyncio.CancelledError:
             yield f"data: {json.dumps({'status': 'cancelled', 'message': 'Request cancelled by client'})}\n\n"
         except Exception as e:

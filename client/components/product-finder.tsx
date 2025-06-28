@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Loader2, Search, Globe, MessageCircle, Sparkles, AlertCircle } from "lucide-react"
+import { Loader2, Search, MessageCircle, Sparkles, AlertCircle } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 interface Message {
@@ -17,23 +17,23 @@ interface Message {
 }
 
 export default function ProductFinder() {
-  const [url, setUrl] = useState("")
+  const [searchQuery, setSearchQuery] = useState("")
   const [query, setQuery] = useState("")
   const [messages, setMessages] = useState<Message[]>([])
   const [loading, setLoading] = useState(false)
-  const [currentStep, setCurrentStep] = useState<"url" | "chat">("url")
+  const [currentStep, setCurrentStep] = useState<"search" | "chat">("search")
   const [error, setError] = useState<string | null>(null)
   const abortControllerRef = useRef<AbortController | null>(null)
 
-  const handleUrlSubmit = async (e: React.FormEvent) => {
+  const handleSearchSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!url.trim()) return
+    if (!searchQuery.trim()) return
 
     setCurrentStep("chat")
     setMessages([
       {
         role: "assistant",
-        content: `Great! I'm ready to help you find products from ${url}. What are you looking for?`,
+        content: `Perfect! I'm ready to help you find "${searchQuery}" products. Ask me anything about these products!`,
       },
     ])
     setError(null)
@@ -65,8 +65,7 @@ export default function ProductFinder() {
         },
         body: JSON.stringify({
           messages: [...messages, userMessage],
-          url,
-          query: query,
+          query: searchQuery + " " + query,
         }),
         signal: abortControllerRef.current.signal,
       })
@@ -112,9 +111,9 @@ export default function ProductFinder() {
       abortControllerRef.current.abort()
     }
 
-    setCurrentStep("url")
+    setCurrentStep("search")
     setMessages([])
-    setUrl("")
+    setSearchQuery("")
     setQuery("")
     setError(null)
     setLoading(false)
@@ -140,7 +139,7 @@ export default function ProductFinder() {
             </div>
             <h1 className="text-4xl font-bold text-gradient-orange">AI Product Finder</h1>
           </div>
-          <p className="text-gray-400 text-lg">Discover products from any website using AI-powered search</p>
+          <p className="text-gray-400 text-lg">Search and discover products using AI-powered intelligent search</p>
         </div>
 
         {/* Error Display */}
@@ -155,23 +154,23 @@ export default function ProductFinder() {
           </Card>
         )}
 
-        {currentStep === "url" ? (
-          /* URL Input Step */
+        {currentStep === "search" ? (
+          /* Search Input Step */
           <Card className="backdrop-orange border-glow-orange">
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-white">
-                <Globe className="w-5 h-5 text-orange-400" />
-                Enter Website URL
+                <Search className="w-5 h-5 text-orange-400" />
+                Search for Products
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <form onSubmit={handleUrlSubmit} className="space-y-4">
+              <form onSubmit={handleSearchSubmit} className="space-y-4">
                 <div className="relative">
                   <Input
-                    type="url"
-                    placeholder="https://example-store.com"
-                    value={url}
-                    onChange={(e) => setUrl(e.target.value)}
+                    type="text"
+                    placeholder="e.g., wireless headphones, laptop, smartphone"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
                     className="border-glow-orange bg-black/50 text-white placeholder-gray-500"
                     required
                   />
@@ -189,11 +188,11 @@ export default function ProductFinder() {
         ) : (
           /* Chat Interface */
           <div className="space-y-6">
-            {/* Website Badge */}
+            {/* Search Query Badge */}
             <div className="flex items-center justify-between">
               <Badge variant="outline" className="border-orange-500/30 text-orange-400 bg-orange-500/10">
-                <Globe className="w-3 h-3 mr-1" />
-                {new URL(url).hostname}
+                <Search className="w-3 h-3 mr-1" />
+                Searching for: {searchQuery}
               </Badge>
               <Button
                 variant="outline"
@@ -202,7 +201,7 @@ export default function ProductFinder() {
                 className="border-orange-500/30 text-orange-400 hover:bg-orange-500/10"
                 disabled={loading}
               >
-                Change Website
+                New Search
               </Button>
             </div>
 
@@ -251,7 +250,7 @@ export default function ProductFinder() {
               <CardContent className="p-4">
                 <form onSubmit={handleQuerySubmit} className="flex gap-2">
                   <Input
-                    placeholder="What products are you looking for?"
+                    placeholder="Ask me about these products or refine your search..."
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
                     className="border-glow-orange bg-black/50 text-white placeholder-gray-500"

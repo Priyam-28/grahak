@@ -10,9 +10,10 @@ playwright
 fastapi
 uvicorn
 pydantic
-requests
 langchain-ollama
 langchain-core
 python-multipart
 murf
-playwright
+crawl4ai
+fake-useragent
+serpapi

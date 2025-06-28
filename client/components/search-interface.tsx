@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Loader2, Search, Globe, MessageCircle, Sparkles, AlertCircle, ArrowLeft } from "lucide-react"
+import { Loader2, Search, MessageCircle, Sparkles, AlertCircle, ArrowLeft } from "lucide-react"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
 import { VoiceInput } from "@/components/voice-input"
@@ -22,26 +22,26 @@ interface Message {
 }
 
 export function SearchInterface() {
-  const [url, setUrl] = useState("")
+  const [searchQuery, setSearchQuery] = useState("")
   const [query, setQuery] = useState("")
   const [messages, setMessages] = useState<Message[]>([])
   const [loading, setLoading] = useState(false)
-  const [currentStep, setCurrentStep] = useState<"url" | "chat">("url")
+  const [currentStep, setCurrentStep] = useState<"search" | "chat">("search")
   const [error, setError] = useState<string | null>(null)
   const [voiceEnabled, setVoiceEnabled] = useState(false)
   const [selectedVoice, setSelectedVoice] = useState("en-US-terrell")
   const [showVoiceSettings, setShowVoiceSettings] = useState(false)
   const abortControllerRef = useRef<AbortController | null>(null)
 
-  const handleUrlSubmit = async (e: React.FormEvent) => {
+  const handleSearchSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!url.trim()) return
+    if (!searchQuery.trim()) return
 
     setCurrentStep("chat")
     setMessages([
       {
         role: "assistant",
-        content: `Perfect! I'm ready to help you find products from ${new URL(url).hostname}. What are you looking for?`,
+        content: `Perfect! I'm ready to help you find "${searchQuery}" products. Ask me anything about these products or related items!`,
       },
     ])
     setError(null)
@@ -75,8 +75,7 @@ export function SearchInterface() {
         },
         body: JSON.stringify({
           messages: [...messages, userMessage],
-          url,
-          query: query,
+          query: searchQuery + " " + query,
           voice_enabled: voiceEnabled,
           voice_id: selectedVoice,
         }),
@@ -124,9 +123,9 @@ export function SearchInterface() {
       abortControllerRef.current.abort()
     }
 
-    setCurrentStep("url")
+    setCurrentStep("search")
     setMessages([])
-    setUrl("")
+    setSearchQuery("")
     setQuery("")
     setError(null)
     setLoading(false)
@@ -160,7 +159,7 @@ export function SearchInterface() {
             <h1 className="text-4xl font-bold text-gradient-primary">AI Product Search</h1>
           </div>
           <p className="text-gray-600 dark:text-gray-400 text-lg">
-            Discover products from any website using intelligent AI search with voice support
+            Search and discover products using intelligent AI search with voice support
           </p>
         </div>
 
@@ -199,23 +198,23 @@ export function SearchInterface() {
           </Card>
         )}
 
-        {currentStep === "url" ? (
-          /* URL Input Step */
+        {currentStep === "search" ? (
+          /* Search Input Step */
           <Card className="glass-card glow-primary hover-lift">
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
-                <Globe className="w-5 h-5 text-primary" />
-                Enter Website URL
+                <Search className="w-5 h-5 text-primary" />
+                Search for Products
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <form onSubmit={handleUrlSubmit} className="space-y-6">
+              <form onSubmit={handleSearchSubmit} className="space-y-6">
                 <div className="relative">
                   <Input
-                    type="url"
-                    placeholder="https://example-store.com"
-                    value={url}
-                    onChange={(e) => setUrl(e.target.value)}
+                    type="text"
+                    placeholder="e.g., wireless headphones, laptop, smartphone"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
                     className="glass-card text-lg py-6 px-4 border-primary/30 focus:border-primary focus:ring-primary/20"
                     required
                   />
@@ -234,11 +233,11 @@ export function SearchInterface() {
         ) : (
           /* Chat Interface */
           <div className="space-y-6">
-            {/* Website Badge */}
+            {/* Search Query Badge */}
             <div className="flex items-center justify-between">
               <Badge variant="outline" className="glass-card border-primary/30 text-primary px-4 py-2">
-                <Globe className="w-4 h-4 mr-2" />
-                {new URL(url).hostname}
+                <Search className="w-4 h-4 mr-2" />
+                Searching for: {searchQuery}
               </Badge>
               <Button
                 variant="outline"
@@ -248,7 +247,7 @@ export function SearchInterface() {
                 disabled={loading}
               >
                 <ArrowLeft className="w-4 h-4 mr-2" />
-                Change Website
+                New Search
               </Button>
             </div>
 
@@ -302,7 +301,7 @@ export function SearchInterface() {
               <CardContent className="p-4">
                 <form onSubmit={handleQuerySubmit} className="flex gap-3">
                   <Input
-                    placeholder="What products are you looking for? (or use voice input)"
+                    placeholder="Ask me about these products or search for more..."
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
                     className="glass-card border-primary/30 focus:border-primary focus:ring-primary/20"
