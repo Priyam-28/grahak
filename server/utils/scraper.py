@@ -1,540 +1,289 @@
-import requests
-from bs4 import BeautifulSoup
-import time
-import random
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any, Union
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Header
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+import asyncio
 import json
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urlparse
-import fake_useragent
-import os
-from tavily import TavilyClient
+import uuid
+from typing import List, Optional, Tuple, Dict, Any
+from pydantic import BaseModel
+from utils.session_manager import SessionManager, SessionData
+from utils.web_search_handler import fetch_and_scrape_tavily_results
+from utils.llm_formatter import generate_formatted_response
+from utils.scraper import SerpAPIIntegration, ScraperPoolManager, ProductData, SERPAPI_API_KEY
+from utils.parser import get_llm_summary, stream_llm_summary, parse_with_ollama
+
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/findproduct", tags=["findproduct"])
 
-# Tavily API configuration
-TAVILY_API_KEY = "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"  # Set your Tavily API key as environment variable
-if not TAVILY_API_KEY:
-    logger.warning("TAVILY_API_KEY environment variable not found. Tavily API calls will fail.")
+# --- Global Session Manager ---
+# This will keep session data in memory as long as the server process is alive.
+# For production, a more persistent session backend or distributed cache might be needed.
+session_manager = SessionManager()
 
-# Popular e-commerce sites to target
-POPULAR_ECOMMERCE_SITES = [
-    "amazon.in", "flipkart.com", "myntra.com", "ajio.com", "nykaa.com",
-    "snapdeal.com", "shopclues.com", "tatacliq.com", "paytmmall.com", "reliancedigital.in"
-]
+# --- Pydantic Models ---
+class ChatMessage(BaseModel):
+    role: str
+    content: str
 
-@dataclass
-class ScrapingConfig:
-    """Configuration for scraping strategies"""
-    site_name: str
-    selectors: Dict[str, str] = field(default_factory=dict)
-    headers: Dict[str, str] = field(default_factory=dict)
-    delay_range: tuple = (1, 3)
-    use_proxies: bool = False  # Disabled for simplicity
-    max_retries: int = 2
-    timeout: int = 10
+class ChatRequest(BaseModel):
+    messages: Optional[List[ChatMessage]] = [] # Full chat history if provided by client
+    query: str                               # The user's current query/message
+    session_id: Optional[str] = None         # Client can send a session_id to maintain context
 
-@dataclass
-class ProductData:
-    """Standardized product data structure"""
-    title: str = ""
-    price: str = ""
-    rating: str = ""
-    image_url: str = ""
-    description: str = ""
-    availability: str = ""
-    reviews_count: str = ""
-    seller: str = ""
-    product_url: str = ""
-    platform: str = ""
-    raw_data: Dict[str, Any] = field(default_factory=dict)
+# --- Helper to convert ProductData to Dict for API response ---
+def product_data_to_dict(p_data: ProductData) -> Dict[str, Any]:
+    return {
+        "title": p_data.title,
+        "price": p_data.price,
+        "image_url": p_data.image_url,
+        "product_url": p_data.product_url,
+        "platform": p_data.platform,
+        "description": (p_data.description[:150] + '...' if p_data.description and len(p_data.description) > 150 else p_data.description),
+        "rating": p_data.rating,
+        # "raw_data": p_data.raw_data # Usually not needed for frontend
+    }
 
-class BrowserFingerprintManager:
-    """Manages browser fingerprint randomization"""
-    
-    def __init__(self):
-        self.ua = fake_useragent.UserAgent()
-    
-    def get_headers(self, platform: str = "") -> Dict[str, str]:
-        """Generate randomized headers"""
-        base_headers = {
-            'User-Agent': self.ua.random,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Cache-Control': 'no-cache',
-            'DNT': '1',
-        }
-        
-        # Platform-specific headers
-        if platform.lower() == 'amazon':
-            base_headers.update({
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-            })
-        
-        return base_headers
+# --- New Core Logic Function using Session, ChromaDB, Tavily, and LLM Formatter ---
+async def process_chat_query_with_rag(
+    user_query: str,
+    session_id_str: str,
+    num_tavily_results_to_fetch: int = 7,
+    num_urls_to_scrape_from_tavily: int = 3, # Scrape fewer for speed
+    num_chroma_results_for_context: int = 5,
+    num_final_products_to_feature: int = 6
+) -> Dict[str, Any]:
 
-class SiteScrapingStrategy:
-    """Base class for site-specific scraping strategies"""
-    
-    def __init__(self, config: ScrapingConfig):
-        self.config = config
-    
-    def extract_data(self, soup: BeautifulSoup, url: str) -> ProductData:
-        """Extract data using site-specific selectors"""
-        raise NotImplementedError
+    logger.info(f"Processing query '{user_query}' for session '{session_id_str}'")
 
-class AmazonScrapingStrategy(SiteScrapingStrategy):
-    """Amazon-specific scraping strategy"""
-    
-    def __init__(self):
-        config = ScrapingConfig(
-            site_name="amazon",
-            selectors={
-                'title': '#productTitle, .product-title, [data-automation-id="product-title"]',
-                'price': '.a-price-whole, .a-price .a-offscreen, #price_inside_buybox, .a-price-range',
-                'rating': '.a-icon-alt, .reviewCountTextLinkedHistogram, [data-hook="average-star-rating"]',
-                'image': '#landingImage, .a-dynamic-image, #imgTagWrapperId img',
-                'description': '#feature-bullets ul, .a-unordered-list, #productDescription',
-                'availability': '#availability span, .a-size-medium',
-                'reviews_count': '#acrCustomerReviewText, [data-hook="total-review-count"]',
-                'seller': '#sellerProfileTriggerId, .tabular-buybox-text'
-            },
-            delay_range=(1, 3)
-        )
-        super().__init__(config)
-    
-    def extract_data(self, soup: BeautifulSoup, url: str) -> ProductData:
-        """Extract Amazon product data"""
-        product = ProductData(platform="Amazon", product_url=url)
-        
-        # Title
-        title_elem = soup.select_one(self.config.selectors['title'])
-        product.title = title_elem.get_text(strip=True) if title_elem else ""
-        
-        # Price - try multiple selectors
-        price_elem = soup.select_one(self.config.selectors['price'])
-        if price_elem:
-            price_text = price_elem.get_text(strip=True)
-            product.price = price_text
-        
-        # Rating
-        rating_elem = soup.select_one(self.config.selectors['rating'])
-        if rating_elem:
-            rating_text = rating_elem.get('alt', '') or rating_elem.get_text(strip=True)
-            if rating_text:
-                # Extract number from rating text
-                import re
-                rating_match = re.search(r'(\d+\.?\d*)', rating_text)
-                product.rating = rating_match.group(1) if rating_match else ""
-        
-        # Image
-        img_elem = soup.select_one(self.config.selectors['image'])
-        if img_elem:
-            product.image_url = img_elem.get('src') or img_elem.get('data-src', '')
-        
-        # Description
-        desc_elem = soup.select_one(self.config.selectors['description'])
-        if desc_elem:
-            if desc_elem.find_all('li'):
-                desc_items = desc_elem.find_all('li')
-                product.description = ' '.join([li.get_text(strip=True) for li in desc_items[:3]])
-            else:
-                product.description = desc_elem.get_text(strip=True)[:200]
-        
-        return product
+    # 1. Get or create session
+    session_data: SessionData = session_manager.get_or_create_session(session_id_str)
+    current_chat_history = list(session_data.chat_history) # Make a copy
 
-class FlipkartScrapingStrategy(SiteScrapingStrategy):
-    """Flipkart-specific scraping strategy"""
-    
-    def __init__(self):
-        config = ScrapingConfig(
-            site_name="flipkart",
-            selectors={
-                'title': '.B_NuCI, .x-product-title-label, ._35KyD6',
-                'price': '._30jeq3._16Jk6d, .CEmiEU .hl05eU, ._1_WHN1',
-                'rating': '._3LWZlK, .XQDdHH, ._3nGUzT',
-                'image': '._396cs4._2amPTt._3qGmMb, .q6DClP, ._2r_T1I',
-                'description': '._1mXcCf.RmoJUa, .qnEqpe, ._1AN87F',
-                'availability': '._16FRp0, .Bz_DlC',
-                'reviews_count': '._2_R_DZ, .row._2afbiS',
-                'seller': '.L56qGx, ._3LcAWX'
-            },
-            delay_range=(1, 3)
-        )
-        super().__init__(config)
-    
-    def extract_data(self, soup: BeautifulSoup, url: str) -> ProductData:
-        """Extract Flipkart product data"""
-        product = ProductData(platform="Flipkart", product_url=url)
-        
-        # Title
-        title_elem = soup.select_one(self.config.selectors['title'])
-        product.title = title_elem.get_text(strip=True) if title_elem else ""
-        
-        # Price
-        price_elem = soup.select_one(self.config.selectors['price'])
-        product.price = price_elem.get_text(strip=True) if price_elem else ""
-        
-        # Rating
-        rating_elem = soup.select_one(self.config.selectors['rating'])
-        product.rating = rating_elem.get_text(strip=True) if rating_elem else ""
-        
-        # Image
-        img_elem = soup.select_one(self.config.selectors['image'])
-        if img_elem:
-            product.image_url = img_elem.get('src') or img_elem.get('data-src', '')
-        
-        # Description
-        desc_elem = soup.select_one(self.config.selectors['description'])
-        product.description = desc_elem.get_text(strip=True)[:200] if desc_elem else ""
-        
-        return product
+    # 2. RAG Step 1: Query existing session data in ChromaDB
+    logger.info(f"Session {session_id_str}: Querying ChromaDB for relevant existing products.")
+    products_from_chroma: List[ProductData] = await asyncio.to_thread(
+        session_manager.query_session_chroma,
+        session_data,
+        user_query,
+        k=num_chroma_results_for_context
+    )
+    logger.info(f"Session {session_id_str}: Found {len(products_from_chroma)} products in ChromaDB.")
 
-class GenericScrapingStrategy(SiteScrapingStrategy):
-    """Generic scraping strategy for unknown sites"""
-    
-    def __init__(self):
-        config = ScrapingConfig(
-            site_name="generic",
-            selectors={
-                'title': 'h1, .title, .product-title, [class*="title"], [class*="name"]',
-                'price': '[class*="price"], [class*="cost"], [class*="amount"]',
-                'rating': '[class*="rating"], [class*="star"], [class*="review"]',
-                'image': '.product-image img, .main-image, [class*="product"] img',
-                'description': '.description, .product-description, [class*="desc"]',
-            },
-            delay_range=(1, 2)
-        )
-        super().__init__(config)
-    
-    def extract_data(self, soup: BeautifulSoup, url: str) -> ProductData:
-        """Extract generic product data"""
-        domain = urlparse(url).netloc
-        product = ProductData(platform=domain, product_url=url)
-        
-        # Title
-        title_elem = soup.select_one(self.config.selectors['title'])
-        product.title = title_elem.get_text(strip=True) if title_elem else ""
-        
-        # Price
-        price_elem = soup.select_one(self.config.selectors['price'])
-        product.price = price_elem.get_text(strip=True) if price_elem else ""
-        
-        # Rating
-        rating_elem = soup.select_one(self.config.selectors['rating'])
-        product.rating = rating_elem.get_text(strip=True) if rating_elem else ""
-        
-        # Image
-        img_elem = soup.select_one(self.config.selectors['image'])
-        if img_elem:
-            product.image_url = img_elem.get('src') or img_elem.get('data-src', '')
-        
-        # Description
-        desc_elem = soup.select_one(self.config.selectors['description'])
-        product.description = desc_elem.get_text(strip=True)[:200] if desc_elem else ""
-        
-        return product
+    # 3. Decision for Web Search (Simplified: always search for now to get freshest info / augment)
+    #    A more advanced agent would make this decision. Here, we combine.
+    logger.info(f"Session {session_id_str}: Performing Tavily web search for query '{user_query}'.")
+    newly_scraped_products: List[ProductData] = await asyncio.to_thread(
+        fetch_and_scrape_tavily_results,
+        user_query,
+        num_tavily_results=num_tavily_results_to_fetch,
+        num_urls_to_scrape=num_urls_to_scrape_from_tavily
+    )
+    logger.info(f"Session {session_id_str}: Scraped {len(newly_scraped_products)} new products from Tavily search.")
 
-class TavilyIntegration:
-    """Integration with Tavily API for search-based product discovery"""
-    
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        self.client = TavilyClient(api_key=api_key)
-    
-    def get_ecommerce_links_from_query(self, query: str, num_results: int = 10) -> List[str]:
-        """
-        Search for e-commerce product links using Tavily API
-        Enhanced to target popular Indian e-commerce sites
-        """
-        try:
-            # Create search query that targets popular e-commerce sites
-            site_queries = []
-            for site in POPULAR_ECOMMERCE_SITES[:5]:  # Top 5 sites for better results
-                site_queries.append(f"site:{site} {query}")
-            
-            all_urls = []
-            
-            # Search each site individually for better targeting
-            for site_query in site_queries:
-                try:
-                    response = self.client.search(
-                        query=site_query,
-                        search_depth="basic",
-                        max_results=3,  # 3 results per site
-                        include_domains=None,
-                        exclude_domains=None
-                    )
-                    
-                    for result in response.get('results', []):
-                        url = result.get('url')
-                        if url and self._is_product_url(url):
-                            all_urls.append(url)
-                            
-                except Exception as e:
-                    logger.warning(f"Error searching site {site_query}: {e}")
-                    continue
-            
-            # If we don't have enough results, do a general search
-            if len(all_urls) < num_results // 2:
-                try:
-                    general_query = f"{query} price buy online india"
-                    response = self.client.search(
-                        query=general_query,
-                        search_depth="basic",
-                        max_results=num_results,
-                        include_domains=POPULAR_ECOMMERCE_SITES
-                    )
-                    
-                    for result in response.get('results', []):
-                        url = result.get('url')
-                        if url and self._is_product_url(url) and url not in all_urls:
-                            all_urls.append(url)
-                            
-                except Exception as e:
-                    logger.error(f"Error in general Tavily search: {e}")
-            
-            # Remove duplicates and limit results
-            unique_urls = list(dict.fromkeys(all_urls))[:num_results]
-            logger.info(f"Found {len(unique_urls)} unique e-commerce URLs for query: {query}")
-            return unique_urls
-            
-        except Exception as e:
-            logger.error(f"Tavily search error: {e}")
-            return []
-    
-    def _is_product_url(self, url: str) -> bool:
-        """Check if URL is likely a product page"""
-        if not url:
-            return False
-            
-        domain = urlparse(url).netloc.lower()
-        
-        # Check if it's from a known e-commerce site
-        if not any(site in domain for site in POPULAR_ECOMMERCE_SITES):
-            return False
-        
-        # Check for product page indicators
-        product_indicators = [
-            '/dp/', '/product/', '/p/', '/item/', '/buy/',
-            'product-', 'item-', '/gp/product/', '/pd/'
-        ]
-        
-        return any(indicator in url.lower() for indicator in product_indicators)
+    # 4. Add newly scraped products to session (ChromaDB and cache)
+    if newly_scraped_products:
+        # This is a blocking call internally due to Chroma/embeddings, so run in thread
+        await asyncio.to_thread(session_manager.add_products_to_session, session_data, newly_scraped_products)
 
-class ScraperPoolManager:
-    """Main scraper pool manager with Tavily integration"""
-    
-    def __init__(self, tavily_api_key: Optional[str] = TAVILY_API_KEY, max_workers: int = 5):
-        self.fingerprint_manager = BrowserFingerprintManager()
-        if not tavily_api_key:
-            logger.error("Tavily API key is not configured. ScraperPoolManager cannot use Tavily.")
-            self.tavily = None
-        else:
-            self.tavily = TavilyIntegration(tavily_api_key)
-        self.max_workers = max_workers
-        
-        # Initialize scraping strategies
-        self.strategies = {
-            'amazon': AmazonScrapingStrategy(),
-            'flipkart': FlipkartScrapingStrategy(),
-            'generic': GenericScrapingStrategy()
-        }
-    
-    def _detect_platform(self, url: str) -> str:
-        """Detect platform from URL"""
-        domain = urlparse(url).netloc.lower()
-        
-        if 'amazon' in domain:
-            return 'amazon'
-        elif 'flipkart' in domain:
-            return 'flipkart'
-        else:
-            return 'generic'
-    
-    def _scrape_single_url(self, url: str, strategy: SiteScrapingStrategy) -> Optional[ProductData]:
-        """Scrape a single URL with retries and error handling"""
-        headers = self.fingerprint_manager.get_headers(strategy.config.site_name)
-        
-        for attempt in range(strategy.config.max_retries):
-            try:
-                # Add random delay
-                delay = random.uniform(*strategy.config.delay_range)
-                time.sleep(delay)
-                
-                # Make request
-                response = requests.get(
-                    url,
-                    headers=headers,
-                    timeout=strategy.config.timeout,
-                    allow_redirects=True
-                )
-                response.raise_for_status()
-                
-                # Parse and extract data
-                soup = BeautifulSoup(response.text, 'html.parser')
-                product_data = strategy.extract_data(soup, url)
-                
-                # Validate extracted data
-                if product_data.title:  # At least title should be present
-                    logger.info(f"Successfully scraped: {url}")
-                    return product_data
-                else:
-                    logger.warning(f"No valid data extracted from: {url}")
-                
-            except requests.RequestException as e:
-                logger.warning(f"Attempt {attempt + 1} failed for {url}: {e}")
-                
-                if attempt == strategy.config.max_retries - 1:
-                    logger.error(f"Failed to scrape {url} after {strategy.config.max_retries} attempts")
-        
-        return None
-    
-    def scrape_urls(self, urls: List[str]) -> List[ProductData]:
-        """Scrape multiple URLs concurrently"""
-        results = []
-        
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_url = {}
-            
-            for url in urls:
-                platform = self._detect_platform(url)
-                strategy = self.strategies.get(platform, self.strategies['generic'])
-                
-                future = executor.submit(self._scrape_single_url, url, strategy)
-                future_to_url[future] = url
-            
-            for future in as_completed(future_to_url):
-                url = future_to_url[future]
-                try:
-                    result = future.result()
-                    if result:
-                        results.append(result)
-                except Exception as e:
-                    logger.error(f"Error processing {url}: {e}")
-        
-        return results
-    
-    def search_and_scrape_products(self, query: str, max_results: int = 10) -> List[ProductData]:
-        """
-        Main function to search for products and scrape them
-        This replaces the old SerpAPI functionality
-        """
-        if not self.tavily:
-            logger.error("Tavily API not configured")
-            return []
-        
-        try:
-            # Step 1: Get e-commerce URLs using Tavily
-            logger.info(f"Searching for e-commerce URLs for query: '{query}'")
-            ecommerce_urls = self.tavily.get_ecommerce_links_from_query(query, num_results=max_results)
-            
-            if not ecommerce_urls:
-                logger.warning(f"No e-commerce URLs found for query: '{query}'")
-                return []
-            
-            # Step 2: Scrape the URLs
-            logger.info(f"Scraping {len(ecommerce_urls)} URLs")
-            scraped_products = self.scrape_urls(ecommerce_urls)
-            
-            # Step 3: Filter and sort results
-            valid_products = [p for p in scraped_products if p.title and p.product_url]
-            
-            # Sort by completeness of data (products with price and rating first)
-            valid_products.sort(
-                key=lambda p: (
-                    bool(p.price and p.rating),  # Has both price and rating
-                    bool(p.price),               # Has price
-                    bool(p.image_url),           # Has image
-                    len(p.description)           # Description length
-                ), 
-                reverse=True
-            )
-            
-            logger.info(f"Successfully scraped {len(valid_products)} valid products")
-            return valid_products[:max_results]
-            
-        except Exception as e:
-            logger.error(f"Error in search_and_scrape_products: {e}")
-            return []
+    # 5. Combine products for LLM context
+    #    Re-query Chroma to get the most relevant combined list after potential additions.
+    #    This ensures products are ranked by relevance to the current query.
+    logger.info(f"Session {session_id_str}: Re-querying ChromaDB for combined product context.")
+    all_relevant_products_for_llm: List[ProductData] = await asyncio.to_thread(
+        session_manager.query_session_chroma,
+        session_data,
+        user_query,
+        k=num_chroma_results_for_context + len(newly_scraped_products) # Get a bit more
+    )
+    # Ensure we have a diverse set, limit to a reasonable number for the LLM prompt
+    all_relevant_products_for_llm = all_relevant_products_for_llm[:10]
+    logger.info(f"Session {session_id_str}: Using {len(all_relevant_products_for_llm)} products for LLM context.")
 
-# High-level functions for the API
-def search_products(query: str, max_results: int = 10) -> str:
-    """
-    Search for products and return formatted results
-    """
-    if not TAVILY_API_KEY:
-        return "Error: Tavily API key not configured."
-    
-    logger.info(f"Searching for products: '{query}'")
-    
-    manager = ScraperPoolManager(tavily_api_key=TAVILY_API_KEY)
-    products = manager.search_and_scrape_products(query, max_results=max_results)
-    
-    return format_products_as_text(products)
 
-def format_products_as_text(products: List[ProductData]) -> str:
-    """
-    Format product data as readable text for LLM processing
-    """
+    # 6. Generate Formatted Response using LLM
+    logger.info(f"Session {session_id_str}: Generating LLM response.")
+    # This call is also blocking internally (LLM inference)
+    llm_text, featured_product_objects = await asyncio.to_thread(
+        generate_formatted_response,
+        user_query,
+        current_chat_history, # Pass current history
+        all_relevant_products_for_llm # Pass combined list for LLM to select from
+    )
+
+    # 7. Update Chat History
+    await asyncio.to_thread(session_manager.add_to_chat_history, session_data, user_query, llm_text)
+
+    # 8. Prepare final list of products for API response (those featured by LLM)
+    #    Limit the number of products actually sent to frontend.
+    final_product_list_for_api = [
+        product_data_to_dict(p) for p in featured_product_objects[:num_final_products_to_feature]
+    ]
+
+    return {
+        "llm_summary": llm_text,
+        "products": final_product_list_for_api,
+        "session_id": session_id_str # Return session_id so client can maintain it
+    }
+
+# --- Helper function to format ProductData for LLM ---
+def format_product_data_for_llm(products: List[ProductData]) -> str:
     if not products:
         return "No products found."
 
-    formatted_text = f"Found {len(products)} products:\n\n"
-    
-    for i, product in enumerate(products, 1):
-        formatted_text += f"--- Product {i} ---\n"
-        formatted_text += f"Title: {product.title}\n"
-        
-        if product.price:
-            formatted_text += f"Price: {product.price}\n"
-        
-        if product.rating:
-            formatted_text += f"Rating: {product.rating}"
-            if product.reviews_count:
-                formatted_text += f" ({product.reviews_count} reviews)"
-            formatted_text += "\n"
-        
-        if product.platform:
-            formatted_text += f"Platform: {product.platform}\n"
-        
-        if product.description:
-            formatted_text += f"Description: {product.description}\n"
-        
-        if product.product_url:
-            formatted_text += f"URL: {product.product_url}\n"
-        
-        formatted_text += "\n"
-    
-    return formatted_text
+    text_parts = ["Here is a list of products found:\n"]
+    for i, p in enumerate(products):
+        text_parts.append(f"\n--- Product {i+1} ---")
+        text_parts.append(f"Title: {p.title if p.title else 'N/A'}")
+        text_parts.append(f"Price: {p.price if p.price else 'N/A'}")
+        if p.platform:
+            text_parts.append(f"Source: {p.platform}")
+        if p.description:
+            # Keep description concise for the LLM context
+            desc_snippet = (p.description[:200] + '...') if len(p.description) > 200 else p.description
+            text_parts.append(f"Description: {desc_snippet}")
+        # Not including image_url or raw_data in the text for LLM
+    return "\n".join(text_parts)
 
-# Backward compatibility functions
-def scrape_website(query: str) -> str:
-    """Backward compatibility function"""
-    return search_products(query)
+@router.post("/chat")
+async def chat_with_products_rag(
+    request: ChatRequest,
+    x_session_id: Optional[str] = Header(None) # Allow session ID via header
+):
+    """
+    Chat interface for finding products using RAG with Tavily and ChromaDB.
+    Returns LLM summary and a list of products.
+    Manages session context and chat history.
+    """
+    try:
+        if not request.query:
+            raise HTTPException(status_code=400, detail="Search query is required")
+        
+        # Determine session ID: Use from request body, then header, or create new
+        session_id_to_use = request.session_id or x_session_id
+        if not session_id_to_use:
+            session_id_to_use = f"session_{uuid.uuid4().hex}" # Generate a new one if none provided
+            logger.info(f"No session_id provided, generated new one: {session_id_to_use}")
+        
+        logger.info(f"Chat request for query: '{request.query}', Session ID: {session_id_to_use}")
+        
+        processed_data = await process_chat_query_with_rag(request.query, session_id_to_use)
+        
+        return {
+            "success": True,
+            "llm_summary": processed_data.get("llm_summary"),
+            "products": processed_data.get("products", []),
+            "session_id": processed_data.get("session_id"), # Send back the session_id used
+            "message": "Products found successfully"
+        }
+        
+    except asyncio.CancelledError:
+        # Handle client disconnection gracefully
+        logger.info("Client disconnected during processing")
+        # For FastAPI, if the client disconnects, the request is cancelled,
+        # and FastAPI handles sending an appropriate response or just closing the connection.
+        # We don't need to return a JSON response here if the connection is already gone.
+        # The 'except asyncio.CancelledError' handles this.
+        pass # Pass here, error is already logged.
+    except Exception as e:
+        logger.error(f"Error in chat: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error in chat: {str(e)}")
 
-def extract_body_content(html_content: str) -> str:
-    """Extract body content from HTML (for compatibility)"""
-    return html_content
+@router.post("/chat-stream")
+async def chat_stream_endpoint(request: ChatRequest):
+    """
+    Streaming chat response. Streams LLM summary first, then sends a final message with product list.
+    """
+    user_query = request.query
+    if not user_query:
+        # This case should ideally be caught by client-side validation too.
+        # For streaming, we can send an error event and then close.
+        async def error_stream():
+            yield f"event: error\ndata: {json.dumps({'error': 'Search query is required'})}\n\n"
+        return StreamingResponse(error_stream(), media_type="text/event-stream")
 
-def clean_body_content(content: str) -> str:
-    """Clean content (for compatibility)"""
-    return content
+    async def stream_generator():
+        # Initial status update
+        yield f"event: status\ndata: {json.dumps({'status': 'processing', 'message': 'Discovering product links...'})}\n\n"
 
-def split_dom_content(content: str, max_length: int = 6000) -> List[str]:
-    """Split content into chunks (for compatibility)"""
-    if len(content) <= max_length:
-        return [content]
+        if not SERPAPI_API_KEY:
+            logger.error("SERPAPI_API_KEY is not configured for streaming.")
+            yield f"event: llm_token\ndata: {json.dumps({'token': 'Error: API key for searching is not configured.'})}\n\n"
+            yield f"event: products\ndata: {json.dumps([])}\n\n" # Send empty products list
+            yield f"event: end\ndata: Stream ended due to configuration error.\n\n"
+            return
+
+        try:
+            # Step A: URL Discovery (Non-streamed part, happens first)
+            serp_integration = SerpAPIIntegration(api_key=SERPAPI_API_KEY)
+            ecommerce_urls = await asyncio.to_thread(
+                serp_integration.get_ecommerce_links_from_query, user_query, num_results=7
+            )
+
+            scraped_products_data: List[ProductData] = []
+            if not ecommerce_urls:
+                logger.warning(f"No e-commerce URLs found by SerpAPI general search for query: '{user_query}'")
+                yield f"event: status\ndata: {json.dumps({'status': 'processing', 'message': 'No direct e-commerce links found, trying fallback shopping search...'})}\n\n"
+                shopping_results_raw = await asyncio.to_thread(serp_integration.search_google_shopping, user_query, num=10)
+                raw_product_objects = [
+                    serp_integration.get_product_data_from_serpapi_result(res, "Google Shopping")
+                    for res in shopping_results_raw if res
+                ]
+                scraped_products_data = [p for p in raw_product_objects if p]
+            else:
+                yield f"event: status\ndata: {json.dumps({'status': 'processing', 'message': f'Found {len(ecommerce_urls)} links, now scraping...'})}\n\n"
+                # Step B: Parallel Scraping (Non-streamed part)
+                scraper_manager = ScraperPoolManager(serpapi_key=SERPAPI_API_KEY)
+                scraped_products_data = await asyncio.to_thread(scraper_manager.scrape_urls, ecommerce_urls)
+
+            if not scraped_products_data:
+                logger.warning(f"No products successfully scraped for query: '{user_query}'")
+                yield f"event: llm_token\ndata: {json.dumps({'token': 'Could not retrieve detailed product information from the web.'})}\n\n"
+                yield f"event: products\ndata: {json.dumps([])}\n\n"
+                yield f"event: end\ndata: Stream ended, no products found.\n\n"
+                return
+
+            yield f"event: status\ndata: {json.dumps({'status': 'processing', 'message': f'Scraped {len(scraped_products_data)} products. Generating summary...'})}\n\n"
+
+            # Step C: Prepare Context for LLM
+            llm_context_text = format_product_data_for_llm(scraped_products_data)
+            
+            # Step D: Stream LLM Processing
+            async for token in stream_llm_summary(llm_context_text, user_query):
+                yield f"event: llm_token\ndata: {json.dumps({'token': token})}\n\n"
+            
+            # Step E: Format and send product list
+            formatted_products_for_client = []
+            for p_data in sorted(scraped_products_data, key=lambda p: (bool(p.image_url and p.price), bool(p.price)), reverse=True)[:10]:
+                 formatted_products_for_client.append({
+                    "title": p_data.title, "price": p_data.price, "image_url": p_data.image_url,
+                    "product_url": p_data.product_url, "platform": p_data.platform,
+                    "description": p_data.description[:150] + '...' if p_data.description and len(p_data.description) > 150 else p_data.description,
+                    "rating": p_data.rating
+                })
+            yield f"event: products\ndata: {json.dumps(formatted_products_for_client)}\n\n"
+            yield f"event: end\ndata: Stream completed successfully.\n\n"
+
+        except asyncio.TimeoutError:
+            logger.error(f"Request timed out during streaming for query: {user_query}")
+            yield f"event: error\ndata: {json.dumps({'error': 'Request timed out. Search might be too complex.'})}\n\n"
+        except asyncio.CancelledError:
+            logger.info(f"Client disconnected during streaming for query: {user_query}")
+            # Don't yield anything further if client disconnected.
+        except Exception as e:
+            logger.error(f"Error in streaming for query '{user_query}': {e}", exc_info=True)
+            yield f"event: error\ndata: {json.dumps({'error': f'Error: {str(e)}'})}\n\n"
     
-    chunks = []
-    for i in range(0, len(content), max_length):
-        chunks.append(content[i:i + max_length])
-    
-    return chunks
+    return StreamingResponse(
+        stream_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Content-Type": "text/event-stream",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "*"
+        }
+    )

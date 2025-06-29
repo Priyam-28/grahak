@@ -245,25 +245,20 @@ export function SearchInterface() {
                               : "glass-card border-primary/20",
                           )}
                         >
-                          <div className="flex items-start gap-2">
-                            {message.role === "assistant" && (
-                              <MessageCircle className="w-4 h-4 text-primary mt-0.5 flex-shrink-0" />
-                            )}
-                            <div className="flex-1">
-                              <p className="text-sm leading-relaxed whitespace-pre-wrap mb-2">{message.content}</p>
-                              {message.audio && <AudioPlayer audioBase64={message.audio} autoPlay={voiceEnabled} />}
-                            </div>
+                          <div className="flex-1">
+                             <p className="text-sm leading-relaxed whitespace-pre-wrap mb-2">{message.content}</p>
+                            {message.audio && <AudioPlayer audioBase64={message.audio} autoPlay={voiceEnabled} />}
                           </div>
                         </div>
                       </div>
-                      {/* Render Product Cards if they exist for an assistant message */}
-                      {message.role === "assistant" && message.products && message.products.length > 0 && (
-                        <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 px-2 py-2 -mx-2 max-h-96 overflow-y-auto">
-                          {message.products.map((product: any, pIndex: number) => (
-                            <ProductCard key={`${index}-${pIndex}`} {...product} />
-                          ))}
-                        </div>
-                      )}
+                    {/* Render Product Cards if they exist for an assistant message */}
+                    {message.role === "assistant" && message.products && message.products.length > 0 && (
+                      <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 px-2 py-2 -mx-2 max-h-96 overflow-y-auto">
+                        {message.products.map((product, pIndex) => (
+                          <ProductCard key={`${index}-${pIndex}`} {...product} />
+                        ))}
+                      </div>
+                    )}
                     </React.Fragment>
                   ))}
                   {loading && (
@@ -279,7 +274,7 @@ export function SearchInterface() {
                     </div>
                   )}
                 </div>
-            </CardContent>
+              </CardContent>
             </Card>
           )}
 
