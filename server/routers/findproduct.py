@@ -1,132 +1,18 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Header
+from fastapi import APIRouter, HTTPException, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from typing import List, Optional
 import asyncio
 import json
 import logging
-import uuid
-from typing import List, Optional, Tuple, Dict, Any
-from pydantic import BaseModel
-from utils.session_manager import SessionManager, SessionData
-from utils.web_search_handler import fetch_and_scrape_tavily_results
-from utils.llm_formatter import generate_formatted_response
-from utils.scraper import SerpAPIIntegration, ScraperPoolManager, ProductData, SERPAPI_API_KEY
-from utils.parser import get_llm_summary, stream_llm_summary, parse_with_ollama
-
+# Updated import: scrape_website, extract_body_content, clean_body_content, split_dom_content are removed
+from utils.scraper import SerpAPIIntegration, ScraperPoolManager, ProductData, SERPAPI_API_KEY # Import necessary classes and API key
+from utils.parser import parse_with_ollama
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/findproduct", tags=["findproduct"])
-
-# --- Global Session Manager ---
-# This will keep session data in memory as long as the server process is alive.
-# For production, a more persistent session backend or distributed cache might be needed.
-session_manager = SessionManager()
-
-# --- Pydantic Models ---
-class ChatMessage(BaseModel):
-    role: str
-    content: str
-
-class ChatRequest(BaseModel):
-    messages: Optional[List[ChatMessage]] = [] # Full chat history if provided by client
-    query: str                               # The user's current query/message
-    session_id: Optional[str] = None         # Client can send a session_id to maintain context
-
-# --- Helper to convert ProductData to Dict for API response ---
-def product_data_to_dict(p_data: ProductData) -> Dict[str, Any]:
-    return {
-        "title": p_data.title,
-        "price": p_data.price,
-        "image_url": p_data.image_url,
-        "product_url": p_data.product_url,
-        "platform": p_data.platform,
-        "description": (p_data.description[:150] + '...' if p_data.description and len(p_data.description) > 150 else p_data.description),
-        "rating": p_data.rating,
-        # "raw_data": p_data.raw_data # Usually not needed for frontend
-    }
-
-# --- New Core Logic Function using Session, ChromaDB, Tavily, and LLM Formatter ---
-async def process_chat_query_with_rag(
-    user_query: str,
-    session_id_str: str,
-    num_tavily_results_to_fetch: int = 7,
-    num_urls_to_scrape_from_tavily: int = 3, # Scrape fewer for speed
-    num_chroma_results_for_context: int = 5,
-    num_final_products_to_feature: int = 6
-) -> Dict[str, Any]:
-
-    logger.info(f"Processing query '{user_query}' for session '{session_id_str}'")
-
-    # 1. Get or create session
-    session_data: SessionData = session_manager.get_or_create_session(session_id_str)
-    current_chat_history = list(session_data.chat_history) # Make a copy
-
-    # 2. RAG Step 1: Query existing session data in ChromaDB
-    logger.info(f"Session {session_id_str}: Querying ChromaDB for relevant existing products.")
-    products_from_chroma: List[ProductData] = await asyncio.to_thread(
-        session_manager.query_session_chroma,
-        session_data,
-        user_query,
-        k=num_chroma_results_for_context
-    )
-    logger.info(f"Session {session_id_str}: Found {len(products_from_chroma)} products in ChromaDB.")
-
-    # 3. Decision for Web Search (Simplified: always search for now to get freshest info / augment)
-    #    A more advanced agent would make this decision. Here, we combine.
-    logger.info(f"Session {session_id_str}: Performing Tavily web search for query '{user_query}'.")
-    newly_scraped_products: List[ProductData] = await asyncio.to_thread(
-        fetch_and_scrape_tavily_results,
-        user_query,
-        num_tavily_results=num_tavily_results_to_fetch,
-        num_urls_to_scrape=num_urls_to_scrape_from_tavily
-    )
-    logger.info(f"Session {session_id_str}: Scraped {len(newly_scraped_products)} new products from Tavily search.")
-
-    # 4. Add newly scraped products to session (ChromaDB and cache)
-    if newly_scraped_products:
-        # This is a blocking call internally due to Chroma/embeddings, so run in thread
-        await asyncio.to_thread(session_manager.add_products_to_session, session_data, newly_scraped_products)
-
-    # 5. Combine products for LLM context
-    #    Re-query Chroma to get the most relevant combined list after potential additions.
-    #    This ensures products are ranked by relevance to the current query.
-    logger.info(f"Session {session_id_str}: Re-querying ChromaDB for combined product context.")
-    all_relevant_products_for_llm: List[ProductData] = await asyncio.to_thread(
-        session_manager.query_session_chroma,
-        session_data,
-        user_query,
-        k=num_chroma_results_for_context + len(newly_scraped_products) # Get a bit more
-    )
-    # Ensure we have a diverse set, limit to a reasonable number for the LLM prompt
-    all_relevant_products_for_llm = all_relevant_products_for_llm[:10]
-    logger.info(f"Session {session_id_str}: Using {len(all_relevant_products_for_llm)} products for LLM context.")
-
-
-    # 6. Generate Formatted Response using LLM
-    logger.info(f"Session {session_id_str}: Generating LLM response.")
-    # This call is also blocking internally (LLM inference)
-    llm_text, featured_product_objects = await asyncio.to_thread(
-        generate_formatted_response,
-        user_query,
-        current_chat_history, # Pass current history
-        all_relevant_products_for_llm # Pass combined list for LLM to select from
-    )
-
-    # 7. Update Chat History
-    await asyncio.to_thread(session_manager.add_to_chat_history, session_data, user_query, llm_text)
-
-    # 8. Prepare final list of products for API response (those featured by LLM)
-    #    Limit the number of products actually sent to frontend.
-    final_product_list_for_api = [
-        product_data_to_dict(p) for p in featured_product_objects[:num_final_products_to_feature]
-    ]
-
-    return {
-        "llm_summary": llm_text,
-        "products": final_product_list_for_api,
-        "session_id": session_id_str # Return session_id so client can maintain it
-    }
 
 # --- Helper function to format ProductData for LLM ---
 def format_product_data_for_llm(products: List[ProductData]) -> str:
@@ -147,36 +33,163 @@ def format_product_data_for_llm(products: List[ProductData]) -> str:
         # Not including image_url or raw_data in the text for LLM
     return "\n".join(text_parts)
 
+# --- Pydantic Models ---
+class SearchRequest(BaseModel):
+    query: str
+
+class ParseRequest(BaseModel): # Potentially deprecated if not used by new flow
+    query: str
+    description: str
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+class ChatRequest(BaseModel):
+    messages: List[ChatMessage]
+    query: str # The user's current query/message
+
+# --- Core Logic Function (Refactored safe_search_and_parse) ---
+async def process_product_query(user_query: str, num_urls_to_find: int = 7, max_products_to_return: int = 10):
+    """
+    Processes a user's product query:
+    1. Finds relevant e-commerce URLs using SerpAPI (general search).
+    2. Scrapes these URLs for product data.
+    3. Generates an LLM summary based on the scraped data and user query.
+    4. Returns the LLM summary and a list of structured product data.
+    """
+    if not SERPAPI_API_KEY:
+        logger.error("SERPAPI_API_KEY is not configured. Cannot process query.")
+        return {"llm_summary": "Error: API key for searching is not configured.", "products": []}
+
+    try:
+        # Step A: URL Discovery
+        logger.info(f"Step A: Discovering e-commerce links for query: '{user_query}'")
+        serp_integration = SerpAPIIntegration(api_key=SERPAPI_API_KEY)
+        
+        # Run blocking I/O in a separate thread
+        ecommerce_urls = await asyncio.to_thread(
+            serp_integration.get_ecommerce_links_from_query,
+            user_query,
+            num_results=num_urls_to_find
+        )
+
+        if not ecommerce_urls:
+            logger.warning(f"No e-commerce URLs found by SerpAPI general search for query: '{user_query}'")
+            # Fallback: Try direct Google Shopping search for some initial products
+            logger.info(f"Falling back to Google Shopping search for query: '{user_query}'")
+            shopping_results_raw = await asyncio.to_thread(serp_integration.search_google_shopping, user_query, num=max_products_to_return)
+            scraped_products = [
+                serp_integration.get_product_data_from_serpapi_result(res, "Google Shopping")
+                for res in shopping_results_raw if res
+            ]
+            # Filter out None results
+            scraped_products = [p for p in scraped_products if p]
+            if not scraped_products:
+                 return {"llm_summary": "No products found for your query after fallback search.", "products": []}
+        else:
+            logger.info(f"Step B: Scraping {len(ecommerce_urls)} URLs: {ecommerce_urls}")
+            scraper_manager = ScraperPoolManager(serpapi_key=SERPAPI_API_KEY) # serpapi_key needed for its strategies even if not searching
+            # Run blocking I/O in a separate thread
+            scraped_products = await asyncio.to_thread(scraper_manager.scrape_urls, ecommerce_urls)
+
+        if not scraped_products:
+            logger.warning(f"No products successfully scraped from discovered URLs for query: '{user_query}'")
+            return {"llm_summary": "Could not retrieve detailed product information from the web.", "products": []}
+
+        logger.info(f"Successfully scraped {len(scraped_products)} products.")
+
+        # Step C: Prepare Context for LLM
+        logger.info("Step C: Preparing context for LLM.")
+        llm_context_text = format_product_data_for_llm(scraped_products)
+
+        # Step D: LLM Processing
+        logger.info(f"Step D: Sending context to LLM for query: '{user_query}'")
+        # The 'description' parameter for parse_with_ollama is the user's original query.
+        llm_summary = await asyncio.wait_for(
+            asyncio.to_thread(parse_with_ollama, [llm_context_text], user_query), # Pass context as a single chunk
+            timeout=180.0
+        )
+        logger.info("LLM processing completed.")
+
+        # Step E: Format API Response (products part)
+        # Select up to max_products_to_return, prioritizing those with image_url and price
+        formatted_products = []
+        for p_data in sorted(scraped_products, key=lambda p: (bool(p.image_url and p.price), bool(p.price)), reverse=True)[:max_products_to_return]:
+            formatted_products.append({
+                "title": p_data.title,
+                "price": p_data.price,
+                "image_url": p_data.image_url,
+                "product_url": p_data.product_url,
+                "platform": p_data.platform,
+                "description": p_data.description[:150] + '...' if p_data.description and len(p_data.description) > 150 else p_data.description, # Snippet
+                "rating": p_data.rating # Added rating
+            })
+        
+        return {"llm_summary": llm_summary if llm_summary else "No specific summary generated.", "products": formatted_products}
+
+    except asyncio.TimeoutError:
+        logger.error(f"Request timed out during processing query: {user_query}")
+        return {"llm_summary": "Search process timed out. Please try a simpler query.", "products": []}
+    except Exception as e:
+        logger.error(f"Error in process_product_query for query '{user_query}': {e}", exc_info=True)
+        return {"llm_summary": f"An error occurred: {str(e)}", "products": []}
+
+
+# @router.post("/search") # Commenting out as it's likely deprecated by the new /chat flow
+# async def search_products_endpoint(request: SearchRequest):
+#     """Search for products and return cleaned content"""
+#     try:
+#         # This would need to be updated to use process_product_query or similar
+#         # For now, focusing on the /chat endpoint
+#         # search_results = await asyncio.wait_for(
+#         #     asyncio.to_thread(search_products, request.query, "google_shopping,amazon", 3),
+#         #     timeout=60.0
+#         # )
+#         # return {
+#         #     "success": True,
+#         #     "content": "This endpoint is under review. Please use /chat.",
+#         #     "message": "Product search completed successfully"
+#         # }
+#         raise HTTPException(status_code=501, detail="This endpoint is currently not implemented. Please use /chat.")
+#     except asyncio.TimeoutError:
+#         raise HTTPException(status_code=408, detail="Request timeout - search took too long to respond")
+#     except Exception as e:
+#         logger.error(f"Error searching for products: {str(e)}")
+#         raise HTTPException(status_code=500, detail=f"Error searching for products: {str(e)}")
+
+# @router.post("/parse") # Commenting out as it's likely deprecated by the new /chat flow
+# async def parse_content(request: ParseRequest):
+#     """Search for products and parse for specific criteria"""
+#     try:
+#         # logger.info(f"Parse request received for query: {request.query}")
+#         # result = await process_product_query(request.query) # Old safe_search_and_parse was different
+#         # return {
+#         #     "success": True,
+#         #     "result": result.get("llm_summary"), # Or adapt to new structure
+#         #     "message": "Content parsed successfully"
+#         # }
+#         raise HTTPException(status_code=501, detail="This endpoint is currently not implemented. Please use /chat.")
+#     except Exception as e:
+#         logger.error(f"Error parsing content: {str(e)}")
+#         raise HTTPException(status_code=500, detail=f"Error parsing content: {str(e)}")
+
 @router.post("/chat")
-async def chat_with_products_rag(
-    request: ChatRequest,
-    x_session_id: Optional[str] = Header(None) # Allow session ID via header
-):
-    """
-    Chat interface for finding products using RAG with Tavily and ChromaDB.
-    Returns LLM summary and a list of products.
-    Manages session context and chat history.
-    """
+async def chat_with_products(request: ChatRequest):
+    """Chat interface for finding products. Returns LLM summary and a list of products."""
     try:
         if not request.query:
             raise HTTPException(status_code=400, detail="Search query is required")
         
-        # Determine session ID: Use from request body, then header, or create new
-        session_id_to_use = request.session_id or x_session_id
-        if not session_id_to_use:
-            session_id_to_use = f"session_{uuid.uuid4().hex}" # Generate a new one if none provided
-            logger.info(f"No session_id provided, generated new one: {session_id_to_use}")
+        logger.info(f"Chat request received for query: {request.query}")
         
-        logger.info(f"Chat request for query: '{request.query}', Session ID: {session_id_to_use}")
-        
-        processed_data = await process_chat_query_with_rag(request.query, session_id_to_use)
+        processed_data = await process_product_query(request.query)
         
         return {
             "success": True,
             "llm_summary": processed_data.get("llm_summary"),
             "products": processed_data.get("products", []),
-            "session_id": processed_data.get("session_id"), # Send back the session_id used
-            "message": "Products found successfully"
+            "message": "Products found successfully" # Or a more dynamic message
         }
         
     except asyncio.CancelledError:
@@ -278,6 +291,7 @@ async def chat_stream_endpoint(request: ChatRequest):
     
     return StreamingResponse(
         stream_generator(),
+        # generate_response(), # Corrected: Removed duplicate/old generator
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

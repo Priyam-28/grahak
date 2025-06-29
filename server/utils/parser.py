@@ -4,7 +4,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Updated template for Phase 1, Step 5 - more conversational and summary focused
 template = (
     "You are a friendly and helpful AI shopping assistant. "
     "A user is looking for products based on this query: '{user_query}'.\n\n"
@@ -16,9 +15,8 @@ template = (
     "If the product context is empty or indicates no products were found, inform the user clearly that no relevant products could be found for their query."
 )
 
-model = OllamaLLM(model="llama3.2") # Assuming llama3.2 is a valid and running model for the user
+model = OllamaLLM(model="llama3.2") 
 
-# Non-streaming version (for /chat endpoint and potentially internal use)
 def get_llm_summary(product_context: str, user_query: str) -> str:
     """
     Generates a summary from the LLM based on product context and user query. (Non-streaming)
@@ -45,7 +43,6 @@ def get_llm_summary(product_context: str, user_query: str) -> str:
         logger.error(f"Error in get_llm_summary: {e}", exc_info=True)
         return f"Error during AI summary generation: {str(e)}"
 
-# Streaming version (for /chat-stream endpoint)
 async def stream_llm_summary(product_context: str, user_query: str):
     """
     Streams the LLM summary token by token. (Async generator)
@@ -62,35 +59,16 @@ async def stream_llm_summary(product_context: str, user_query: str):
         }):
             if isinstance(token, str):
                 yield token
-            # If the response objects are more complex (e.g. AIMessageChunk), extract content:
-            # elif hasattr(token, 'content'):
-            #    yield token.content
-            # else:
-            #    logger.warning(f"Unexpected token type in stream: {type(token)}")
 
 
     except Exception as e:
         logger.error(f"Error in stream_llm_summary: {e}", exc_info=True)
         yield f"Error during AI summary streaming: {str(e)}"
 
-# Keep parse_with_ollama for now if other parts of the system might still use it,
-# but new development should use get_llm_summary or stream_llm_summary.
-# For the router changes, we'll call get_llm_summary (for /chat) and stream_llm_summary (for /chat-stream).
-# The old parse_with_ollama took 'dom_chunks' and 'parse_description'. The new functions take 'product_context' and 'user_query'.
-# If we are sure nothing else uses parse_with_ollama with the old signature, we can remove or refactor it completely.
-# For now, let's assume the router will be updated to use the new functions.
-
 def parse_with_ollama(dom_chunks: list[str], parse_description: str) -> str:
-    """
-    Legacy function. Processes chunks of DOM content against a description using Ollama.
-    New development should prefer get_llm_summary.
-    This function now adapts to call get_llm_summary with the first chunk as context.
-    """
     logger.warning("Legacy parse_with_ollama called. Consider using get_llm_summary or stream_llm_summary.")
     if not dom_chunks:
         return "No content provided to parse."
-
-    # For compatibility, use the first chunk as product_context and parse_description as user_query
     product_context = dom_chunks[0]
     user_query = parse_description
 
