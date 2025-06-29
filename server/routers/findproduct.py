@@ -5,9 +5,9 @@ from typing import List, Optional
 import asyncio
 import json
 import logging
-# Updated import: scrape_website, extract_body_content, clean_body_content, split_dom_content are removed
-from utils.scraper import SerpAPIIntegration, ScraperPoolManager, ProductData, SERPAPI_API_KEY # Import necessary classes and API key
-from utils.parser import parse_with_ollama
+# Updated imports for Tavily integration
+from utils.scraper import TavilyIntegration, ScraperPoolManager, ProductData, TAVILY_API_KEY
+from utils.parser import get_llm_summary, stream_llm_summary, parse_with_ollama
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -49,49 +49,40 @@ class ChatRequest(BaseModel):
     messages: List[ChatMessage]
     query: str # The user's current query/message
 
-# --- Core Logic Function (Refactored safe_search_and_parse) ---
+# --- Core Logic Function (Updated for Tavily) ---
 async def process_product_query(user_query: str, num_urls_to_find: int = 7, max_products_to_return: int = 10):
     """
     Processes a user's product query:
-    1. Finds relevant e-commerce URLs using SerpAPI (general search).
+    1. Finds relevant e-commerce URLs using Tavily API.
     2. Scrapes these URLs for product data.
     3. Generates an LLM summary based on the scraped data and user query.
     4. Returns the LLM summary and a list of structured product data.
     """
-    if not SERPAPI_API_KEY:
-        logger.error("SERPAPI_API_KEY is not configured. Cannot process query.")
+    if not TAVILY_API_KEY:
+        logger.error("TAVILY_API_KEY is not configured. Cannot process query.")
         return {"llm_summary": "Error: API key for searching is not configured.", "products": []}
 
     try:
-        # Step A: URL Discovery
+        # Step A: URL Discovery using Tavily
         logger.info(f"Step A: Discovering e-commerce links for query: '{user_query}'")
-        serp_integration = SerpAPIIntegration(api_key=SERPAPI_API_KEY)
+        tavily_integration = TavilyIntegration(api_key=TAVILY_API_KEY)
         
         # Run blocking I/O in a separate thread
         ecommerce_urls = await asyncio.to_thread(
-            serp_integration.get_ecommerce_links_from_query,
+            tavily_integration.get_ecommerce_links_from_query,
             user_query,
             num_results=num_urls_to_find
         )
 
         if not ecommerce_urls:
-            logger.warning(f"No e-commerce URLs found by SerpAPI general search for query: '{user_query}'")
-            # Fallback: Try direct Google Shopping search for some initial products
-            logger.info(f"Falling back to Google Shopping search for query: '{user_query}'")
-            shopping_results_raw = await asyncio.to_thread(serp_integration.search_google_shopping, user_query, num=max_products_to_return)
-            scraped_products = [
-                serp_integration.get_product_data_from_serpapi_result(res, "Google Shopping")
-                for res in shopping_results_raw if res
-            ]
-            # Filter out None results
-            scraped_products = [p for p in scraped_products if p]
-            if not scraped_products:
-                 return {"llm_summary": "No products found for your query after fallback search.", "products": []}
-        else:
-            logger.info(f"Step B: Scraping {len(ecommerce_urls)} URLs: {ecommerce_urls}")
-            scraper_manager = ScraperPoolManager(serpapi_key=SERPAPI_API_KEY) # serpapi_key needed for its strategies even if not searching
-            # Run blocking I/O in a separate thread
-            scraped_products = await asyncio.to_thread(scraper_manager.scrape_urls, ecommerce_urls)
+            logger.warning(f"No e-commerce URLs found by Tavily search for query: '{user_query}'")
+            return {"llm_summary": "No products found for your query. Please try a different search term.", "products": []}
+        
+        # Step B: Scraping URLs
+        logger.info(f"Step B: Scraping {len(ecommerce_urls)} URLs: {ecommerce_urls}")
+        scraper_manager = ScraperPoolManager(tavily_api_key=TAVILY_API_KEY)
+        # Run blocking I/O in a separate thread
+        scraped_products = await asyncio.to_thread(scraper_manager.scrape_urls, ecommerce_urls)
 
         if not scraped_products:
             logger.warning(f"No products successfully scraped from discovered URLs for query: '{user_query}'")
@@ -105,9 +96,8 @@ async def process_product_query(user_query: str, num_urls_to_find: int = 7, max_
 
         # Step D: LLM Processing
         logger.info(f"Step D: Sending context to LLM for query: '{user_query}'")
-        # The 'description' parameter for parse_with_ollama is the user's original query.
         llm_summary = await asyncio.wait_for(
-            asyncio.to_thread(parse_with_ollama, [llm_context_text], user_query), # Pass context as a single chunk
+            asyncio.to_thread(get_llm_summary, llm_context_text, user_query),
             timeout=180.0
         )
         logger.info("LLM processing completed.")
@@ -135,45 +125,6 @@ async def process_product_query(user_query: str, num_urls_to_find: int = 7, max_
         logger.error(f"Error in process_product_query for query '{user_query}': {e}", exc_info=True)
         return {"llm_summary": f"An error occurred: {str(e)}", "products": []}
 
-
-# @router.post("/search") # Commenting out as it's likely deprecated by the new /chat flow
-# async def search_products_endpoint(request: SearchRequest):
-#     """Search for products and return cleaned content"""
-#     try:
-#         # This would need to be updated to use process_product_query or similar
-#         # For now, focusing on the /chat endpoint
-#         # search_results = await asyncio.wait_for(
-#         #     asyncio.to_thread(search_products, request.query, "google_shopping,amazon", 3),
-#         #     timeout=60.0
-#         # )
-#         # return {
-#         #     "success": True,
-#         #     "content": "This endpoint is under review. Please use /chat.",
-#         #     "message": "Product search completed successfully"
-#         # }
-#         raise HTTPException(status_code=501, detail="This endpoint is currently not implemented. Please use /chat.")
-#     except asyncio.TimeoutError:
-#         raise HTTPException(status_code=408, detail="Request timeout - search took too long to respond")
-#     except Exception as e:
-#         logger.error(f"Error searching for products: {str(e)}")
-#         raise HTTPException(status_code=500, detail=f"Error searching for products: {str(e)}")
-
-# @router.post("/parse") # Commenting out as it's likely deprecated by the new /chat flow
-# async def parse_content(request: ParseRequest):
-#     """Search for products and parse for specific criteria"""
-#     try:
-#         # logger.info(f"Parse request received for query: {request.query}")
-#         # result = await process_product_query(request.query) # Old safe_search_and_parse was different
-#         # return {
-#         #     "success": True,
-#         #     "result": result.get("llm_summary"), # Or adapt to new structure
-#         #     "message": "Content parsed successfully"
-#         # }
-#         raise HTTPException(status_code=501, detail="This endpoint is currently not implemented. Please use /chat.")
-#     except Exception as e:
-#         logger.error(f"Error parsing content: {str(e)}")
-#         raise HTTPException(status_code=500, detail=f"Error parsing content: {str(e)}")
-
 @router.post("/chat")
 async def chat_with_products(request: ChatRequest):
     """Chat interface for finding products. Returns LLM summary and a list of products."""
@@ -189,17 +140,13 @@ async def chat_with_products(request: ChatRequest):
             "success": True,
             "llm_summary": processed_data.get("llm_summary"),
             "products": processed_data.get("products", []),
-            "message": "Products found successfully" # Or a more dynamic message
+            "message": "Products found successfully"
         }
         
     except asyncio.CancelledError:
         # Handle client disconnection gracefully
         logger.info("Client disconnected during processing")
-        # For FastAPI, if the client disconnects, the request is cancelled,
-        # and FastAPI handles sending an appropriate response or just closing the connection.
-        # We don't need to return a JSON response here if the connection is already gone.
-        # The 'except asyncio.CancelledError' handles this.
-        pass # Pass here, error is already logged.
+        pass
     except Exception as e:
         logger.error(f"Error in chat: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error in chat: {str(e)}")
@@ -211,8 +158,6 @@ async def chat_stream_endpoint(request: ChatRequest):
     """
     user_query = request.query
     if not user_query:
-        # This case should ideally be caught by client-side validation too.
-        # For streaming, we can send an error event and then close.
         async def error_stream():
             yield f"event: error\ndata: {json.dumps({'error': 'Search query is required'})}\n\n"
         return StreamingResponse(error_stream(), media_type="text/event-stream")
@@ -221,34 +166,31 @@ async def chat_stream_endpoint(request: ChatRequest):
         # Initial status update
         yield f"event: status\ndata: {json.dumps({'status': 'processing', 'message': 'Discovering product links...'})}\n\n"
 
-        if not SERPAPI_API_KEY:
-            logger.error("SERPAPI_API_KEY is not configured for streaming.")
+        if not TAVILY_API_KEY:
+            logger.error("TAVILY_API_KEY is not configured for streaming.")
             yield f"event: llm_token\ndata: {json.dumps({'token': 'Error: API key for searching is not configured.'})}\n\n"
-            yield f"event: products\ndata: {json.dumps([])}\n\n" # Send empty products list
+            yield f"event: products\ndata: {json.dumps([])}\n\n"
             yield f"event: end\ndata: Stream ended due to configuration error.\n\n"
             return
 
         try:
-            # Step A: URL Discovery (Non-streamed part, happens first)
-            serp_integration = SerpAPIIntegration(api_key=SERPAPI_API_KEY)
+            # Step A: URL Discovery using Tavily
+            tavily_integration = TavilyIntegration(api_key=TAVILY_API_KEY)
             ecommerce_urls = await asyncio.to_thread(
-                serp_integration.get_ecommerce_links_from_query, user_query, num_results=7
+                tavily_integration.get_ecommerce_links_from_query, user_query, num_results=7
             )
 
             scraped_products_data: List[ProductData] = []
             if not ecommerce_urls:
-                logger.warning(f"No e-commerce URLs found by SerpAPI general search for query: '{user_query}'")
-                yield f"event: status\ndata: {json.dumps({'status': 'processing', 'message': 'No direct e-commerce links found, trying fallback shopping search...'})}\n\n"
-                shopping_results_raw = await asyncio.to_thread(serp_integration.search_google_shopping, user_query, num=10)
-                raw_product_objects = [
-                    serp_integration.get_product_data_from_serpapi_result(res, "Google Shopping")
-                    for res in shopping_results_raw if res
-                ]
-                scraped_products_data = [p for p in raw_product_objects if p]
+                logger.warning(f"No e-commerce URLs found by Tavily search for query: '{user_query}'")
+                yield f"event: llm_token\ndata: {json.dumps({'token': 'No products found for your query. Please try a different search term.'})}\n\n"
+                yield f"event: products\ndata: {json.dumps([])}\n\n"
+                yield f"event: end\ndata: Stream ended, no products found.\n\n"
+                return
             else:
                 yield f"event: status\ndata: {json.dumps({'status': 'processing', 'message': f'Found {len(ecommerce_urls)} links, now scraping...'})}\n\n"
-                # Step B: Parallel Scraping (Non-streamed part)
-                scraper_manager = ScraperPoolManager(serpapi_key=SERPAPI_API_KEY)
+                # Step B: Parallel Scraping
+                scraper_manager = ScraperPoolManager(tavily_api_key=TAVILY_API_KEY)
                 scraped_products_data = await asyncio.to_thread(scraper_manager.scrape_urls, ecommerce_urls)
 
             if not scraped_products_data:
@@ -291,7 +233,6 @@ async def chat_stream_endpoint(request: ChatRequest):
     
     return StreamingResponse(
         stream_generator(),
-        # generate_response(), # Corrected: Removed duplicate/old generator
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

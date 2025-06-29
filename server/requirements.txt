@@ -18,3 +18,4 @@ crawl4ai
 fake-useragent
 serpapi
 python-dotenv
+tavily-python
