@@ -10,12 +10,19 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 import fake_useragent
+import os # Added for environment variables
 
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Load SerpAPI key from environment variable
+SERPAPI_API_KEY = os.environ.get("SERPAPI_API_KEY")
+if not SERPAPI_API_KEY:
+    logger.warning("SERPAPI_API_KEY environment variable not found. SerpAPI calls will fail.")
+    # You might want to raise an error here or handle it depending on your application's needs
+    # For now, we'll let it proceed, but SerpAPIIntegration will likely fail if used.
 
 @dataclass
 class ScrapingConfig:
@@ -288,6 +295,42 @@ class MyntraScrapingStrategy(SiteScrapingStrategy):
         return product
 
 
+class BasicScrapingStrategy(SiteScrapingStrategy):
+    """Basic scraping strategy for generic e-commerce sites."""
+    def __init__(self):
+        config = ScrapingConfig(
+            site_name="generic",
+            # No specific selectors, will try generic tags
+            delay_range=(1, 2)
+        )
+        super().__init__(config)
+
+    def extract_data(self, soup: BeautifulSoup, url: str) -> ProductData:
+        product = ProductData(platform="Unknown Ecommerce", product_url=url)
+
+        # Try to get title
+        if soup.title and soup.title.string:
+            product.title = soup.title.string.strip()
+
+        # Try to get meta description as a fallback for description
+        meta_description = soup.find("meta", attrs={"name": "description"})
+        if meta_description and meta_description.get("content"):
+            product.description = meta_description.get("content").strip()
+        else: # Fallback to first few paragraphs if no meta description
+            paragraphs = soup.find_all("p")
+            text_content = ""
+            for p in paragraphs[:3]: # Get first 3 paragraphs
+                text_content += p.get_text(strip=True) + " "
+            product.description = text_content.strip()[:500] # Limit length
+
+        # Price and image_url are unlikely to be found reliably without specific selectors
+        # product.price = ""
+        # product.image_url = ""
+
+        logger.info(f"Basic scraping for {url} extracted title: '{product.title}' and a description snippet.")
+        return product
+
+
 class SerpAPIIntegration:
     """Integration with SerpAPI for search-based scraping"""
     
@@ -319,21 +362,94 @@ class SerpAPIIntegration:
         """Search Google Shopping"""
         return self.search_products(query, engine="google_shopping", **kwargs)
 
+    def get_ecommerce_links_from_query(self, query: str, num_results: int = 10) -> List[str]:
+        """
+        Perform a general Google search and attempt to extract e-commerce product page URLs.
+        """
+        if not self.api_key:
+            logger.error("SerpAPI key not provided for general search.")
+            return []
+        try:
+            logger.info(f"Performing general Google search for query: {query} to find e-commerce links.")
+            search_params = {
+                "q": query,
+                "api_key": self.api_key,
+                "engine": "google",
+                "num": num_results * 2,  # Fetch more results to have a better chance after filtering
+            }
+            search = GoogleSearch(search_params)
+            results = search.get_dict()
+
+            organic_results = results.get("organic_results", [])
+            extracted_links = []
+
+            # Keywords and domain parts that often indicate e-commerce product pages
+            # This list can be expanded.
+            ecommerce_indicators = ["product", "item", "detail", "/p/", "/dp/"]
+            common_ecommerce_domains = [
+                "amazon.", "ebay.", "walmart.", "target.", "bestbuy.",
+                "etsy.", "flipkart.", "myntra.", "rakuten.", "newegg.",
+                "homedepot.", "lowes.", "costco."
+            ] # Add more regional ones if needed
+
+            for res in organic_results:
+                link = res.get("link")
+                title = res.get("title", "").lower()
+                snippet = res.get("snippet", "").lower()
+
+                if not link:
+                    continue
+
+                # Check 1: Domain known for e-commerce
+                is_known_ecommerce_domain = any(domain_part in link for domain_part in common_ecommerce_domains)
+
+                # Check 2: URL path/query parameters indicating product page
+                has_ecommerce_path = any(indicator in link for indicator in ecommerce_indicators)
+
+                # Check 3: Title/snippet containing terms like "buy", "price", "shop", "product"
+                # (More prone to false positives, use with caution or stricter logic)
+                # For now, prioritize domain and path structure.
+
+                if is_known_ecommerce_domain and has_ecommerce_path:
+                    if link not in extracted_links: # Avoid duplicates
+                        extracted_links.append(link)
+                        logger.debug(f"Found potential e-commerce link: {link}")
+                elif is_known_ecommerce_domain and len(extracted_links) < num_results: # If it's a known domain but path is unclear, still consider if we need more links
+                    if link not in extracted_links:
+                         extracted_links.append(link)
+                         logger.debug(f"Found link from known e-commerce domain (less specific path): {link}")
+
+
+                if len(extracted_links) >= num_results:
+                    break
+
+            logger.info(f"Extracted {len(extracted_links)} potential e-commerce links for query '{query}'.")
+            return extracted_links
+
+        except Exception as e:
+            logger.error(f"Error in get_ecommerce_links_from_query: {e}")
+            return []
+
 
 class ScraperPoolManager:
     """Main scraper pool manager"""
     
-    def __init__(self, serpapi_key: Optional[str] = None, max_workers: int = 5):
+    def __init__(self, serpapi_key: Optional[str] = SERPAPI_API_KEY, max_workers: int = 5):
         self.proxy_manager = ProxyManager()
         self.fingerprint_manager = BrowserFingerprintManager()
-        self.serpapi = SerpAPIIntegration(serpapi_key) if serpapi_key else None
+        if not serpapi_key:
+            logger.error("SerpAPI key is not configured. ScraperPoolManager cannot use SerpAPI.")
+            self.serpapi = None
+        else:
+            self.serpapi = SerpAPIIntegration(serpapi_key)
         self.max_workers = max_workers
         
         # Initialize scraping strategies
         self.strategies = {
             'amazon': AmazonScrapingStrategy(),
             'flipkart': FlipkartScrapingStrategy(),
-            'myntra': MyntraScrapingStrategy()
+            'myntra': MyntraScrapingStrategy(),
+            'generic': BasicScrapingStrategy() # Added BasicScrapingStrategy
         }
     
     def _detect_platform(self, url: str) -> str:
@@ -449,6 +565,114 @@ class ScraperPoolManager:
                 logger.error(f"Error searching {platform}: {e}")
         
         return all_results
+
+    def get_product_data_from_serpapi_result(self, result: Dict, platform_hint: str) -> Optional[ProductData]:
+        """
+        Extracts ProductData from a single SerpAPI result item.
+        This is useful for engines like Google Shopping that return structured data.
+        """
+        title = result.get("title")
+        price = result.get("price")
+        product_url = result.get("link")
+        image_url = result.get("thumbnail") # or result.get("image")
+        source = result.get("source") # Retailer/Seller
+        rating = result.get("rating")
+        reviews_count = result.get("reviews")
+        description = result.get("description") # Often a snippet
+
+        if not title or not product_url:
+            return None
+
+        return ProductData(
+            title=str(title),
+            price=str(price) if price else "",
+            rating=str(rating) if rating else "",
+            image_url=str(image_url) if image_url else "",
+            description=str(description) if description else "",
+            availability="", # Typically not in shopping results directly, might need scraping
+            reviews_count=str(reviews_count) if reviews_count else "",
+            seller=str(source) if source else "",
+            product_url=str(product_url),
+            platform=source or platform_hint, # Use source if available, else the hint
+            raw_data=result
+        )
+
+    def search_and_optionally_scrape(self, query: str, platforms: Optional[List[str]] = None, max_results_per_platform: int = 5) -> List[ProductData]:
+        """
+        Search using SerpAPI. If SerpAPI provides enough structured data (e.g., Google Shopping), use that.
+        Otherwise, fall back to scraping URLs obtained from SerpAPI (e.g., Amazon search results).
+        """
+        if not self.serpapi:
+            logger.error("SerpAPI is not initialized in ScraperPoolManager.")
+            return []
+
+        platforms = platforms or ['google_shopping', 'amazon']
+        all_product_data: List[ProductData] = []
+        urls_to_scrape: List[str] = []
+
+        for platform in platforms:
+            try:
+                search_results_raw = []
+                platform_for_data = platform
+                if platform.lower() == 'amazon':
+                    # SerpAPI's Amazon engine gives search results that usually need further scraping
+                    search_results_raw = self.serpapi.search_amazon(query, num=max_results_per_platform * 2) # Get more results as some might be ads/irrelevant
+                    platform_for_data = "Amazon"
+                elif platform.lower() == 'google_shopping':
+                    search_results_raw = self.serpapi.search_google_shopping(query, num=max_results_per_platform)
+                    platform_for_data = "GoogleShopping" # Will be overridden by 'source' if present
+                else:
+                    logger.warning(f"Unsupported platform for SerpAPI search: {platform}")
+                    continue
+
+                logger.info(f"SerpAPI found {len(search_results_raw)} results for '{query}' on {platform}")
+
+                temp_platform_products = []
+                for res in search_results_raw:
+                    # For Google Shopping, try to extract structured data directly
+                    if platform.lower() == 'google_shopping':
+                        product = self.get_product_data_from_serpapi_result(res, platform_for_data)
+                        if product:
+                            temp_platform_products.append(product)
+                    # For Amazon (and others if direct data extraction fails), collect URLs
+                    else: # e.g., Amazon
+                        url = res.get('link') or res.get('product_link')
+                        # Basic filter for Amazon: ensure it's a product URL
+                        if url and 'amazon' in urlparse(url).netloc.lower() and ('/dp/' in url or '/gp/product/' in url):
+                             # Check for duplicates before adding
+                            if not any(existing_url == url for existing_url in urls_to_scrape):
+                                urls_to_scrape.append(url)
+                        elif url and platform.lower() != 'amazon': # For other platforms if we decide to scrape them
+                             if not any(existing_url == url for existing_url in urls_to_scrape):
+                                urls_to_scrape.append(url)
+
+                all_product_data.extend(temp_platform_products[:max_results_per_platform])
+
+
+            except Exception as e:
+                logger.error(f"Error during SerpAPI search for {platform}: {e}")
+
+        # Scrape URLs collected (mostly for Amazon or if Google Shopping results were just links)
+        # Deduplicate URLs before scraping
+        unique_urls_to_scrape = list(set(urls_to_scrape))
+        logger.info(f"Attempting to scrape {len(unique_urls_to_scrape)} unique URLs.")
+
+        # Limit the number of URLs to scrape to avoid excessive requests
+        # Prioritize URLs based on some logic if necessary, here just taking the first N
+        # This limit should be considered along with max_results_per_platform
+        # For instance, if we want total 10 products, and got 3 from GShopping, we might scrape up to 7 URLs.
+        # Here, we'll apply a simpler limit for now.
+        effective_scrape_limit = max(0, (max_results_per_platform * len(platforms)) - len(all_product_data))
+
+        if unique_urls_to_scrape and effective_scrape_limit > 0:
+            scraped_data = self.scrape_urls(unique_urls_to_scrape[:effective_scrape_limit])
+            all_product_data.extend(scraped_data)
+            # Ensure we don't exceed total max_results_per_platform * num_platforms approximately
+            all_product_data = all_product_data[:(max_results_per_platform * len(platforms))]
+
+
+        logger.info(f"Collected {len(all_product_data)} product data entries in total for query '{query}'.")
+        return all_product_data
     
     def export_data(self, data: List[ProductData], format: str = "json", filename: str = None):
         """Export scraped data to various formats"""
@@ -498,218 +722,63 @@ def main():
     
     # Example 2: Search and scrape
     print("\nSearching and scraping...")
-    search_results = manager.search_and_scrape("wireless headphones", ["amazon", "google_shopping"])
+    # Use the new method: search_and_optionally_scrape
+    search_results = manager.search_and_optionally_scrape("wireless headphones", platforms=["google_shopping", "amazon"], max_results_per_platform=3)
     
     # Export results
     manager.export_data(search_results, format="json", filename="headphones_data")
     manager.export_data(search_results, format="csv", filename="headphones_data")
 
-
-def search_products(query: str, platform: str = "amazon", max_results: int = 10) -> str:
-    """
-    Search for products using the query and return formatted results
-    """
-    try:
-        logger.info(f"Searching for products: {query} on {platform}")
-        
-        if platform.lower() == "amazon":
-            return search_amazon_products(query, max_results)
-        elif platform.lower() == "ebay":
-            return search_ebay_products(query, max_results)
-        else:
-            return search_amazon_products(query, max_results)  # Default to Amazon
-            
-    except Exception as e:
-        logger.error(f"Error searching products: {str(e)}")
-        return f"Error searching for products: {str(e)}"
-
-
-def search_amazon_products(query: str, max_results: int = 10) -> str:
-    """
-    Search Amazon for products using requests and BeautifulSoup
-    """
-    try:
-        fingerprint_manager = BrowserFingerprintManager()
-        headers = fingerprint_manager.get_headers()
-        
-        # Format search query for Amazon
-        search_url = f"https://www.amazon.com/s?k={query.replace(' ', '+')}&ref=sr_pg_1"
-        
-        # Add random delay
-        time.sleep(random.uniform(1, 3))
-        
-        response = requests.get(search_url, headers=headers, timeout=15)
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.content, 'html.parser')
-        products = []
-        
-        # Find product containers
-        product_containers = soup.find_all('div', {'data-component-type': 's-search-result'})
-        
-        for container in product_containers[:max_results]:
-            try:
-                product = extract_amazon_product_data(container)
-                if product.title:  # Only add if we have a title
-                    products.append(product)
-            except Exception as e:
-                logger.warning(f"Error extracting product data: {str(e)}")
-                continue
-        
-        if not products:
-            return "No products found for the given search query."
-        
-        # Format products as text
-        return format_products_as_text(products)
-        
-    except Exception as e:
-        logger.error(f"Error searching Amazon: {str(e)}")
-        return f"Error searching Amazon: {str(e)}"
-
-
-def extract_amazon_product_data(container) -> ProductData:
-    """
-    Extract product data from Amazon product container
-    """
-    product = ProductData()
-    product.platform = "Amazon"
+# This function is being replaced by the new fetch_product_information_serpapi and the updated search_products
+# def format_products_as_text(products: List[ProductData]) -> str:
+#     """
+#     Format product data as readable text
+#     """
+#     if not products:
+#         return "No products found."
     
-    try:
-        # Extract title
-        title_element = container.find('h2', class_='a-size-mini')
-        if title_element:
-            title_link = title_element.find('a')
-            if title_link:
-                product.title = title_link.get_text(strip=True)
-                product.product_url = "https://www.amazon.com" + title_link.get('href', '')
+#     formatted_text = f"Found {len(products)} products:\n\n"
+
+#     for i, product in enumerate(products, 1):
+#         formatted_text += f"--- Product {i} ---\n"
+#         formatted_text += f"Title: {product.title}\n"
+
+#         if product.price:
+#             formatted_text += f"Price: {product.price}\n"
         
-        # Extract price
-        price_element = container.find('span', class_='a-price-whole')
-        if price_element:
-            price_fraction = container.find('span', class_='a-price-fraction')
-            price_text = price_element.get_text(strip=True)
-            if price_fraction:
-                price_text += "." + price_fraction.get_text(strip=True)
-            product.price = "$" + price_text
+#         if product.rating:
+#             formatted_text += f"Rating: {product.rating}"
+#             if product.reviews_count:
+#                 formatted_text += f" ({product.reviews_count})"
+#             formatted_text += "\n"
         
-        # Extract rating
-        rating_element = container.find('span', class_='a-icon-alt')
-        if rating_element:
-            rating_text = rating_element.get_text(strip=True)
-            if 'out of' in rating_text:
-                product.rating = rating_text.split()[0]
+#         if product.availability:
+#             formatted_text += f"Availability: {product.availability}\n"
         
-        # Extract reviews count
-        reviews_element = container.find('span', class_='a-size-base')
-        if reviews_element and '(' in reviews_element.get_text():
-            product.reviews_count = reviews_element.get_text(strip=True)
+#         if product.platform:
+#             formatted_text += f"Platform: {product.platform}\n"
         
-        # Extract image
-        img_element = container.find('img', class_='s-image')
-        if img_element:
-            product.image_url = img_element.get('src', '')
+#         if product.product_url:
+#             formatted_text += f"URL: {product.product_url}\n"
         
-        # Extract availability/delivery info
-        delivery_element = container.find('span', {'data-component-type': 's-delivery-message'})
-        if delivery_element:
-            product.availability = delivery_element.get_text(strip=True)
-        
-    except Exception as e:
-        logger.warning(f"Error extracting product data: {str(e)}")
+#         formatted_text += "\n"
     
-    return product
-
-
-def search_ebay_products(query: str, max_results: int = 10) -> str:
-    """
-    Search eBay for products (simplified implementation)
-    """
-    try:
-        fingerprint_manager = BrowserFingerprintManager()
-        headers = fingerprint_manager.get_headers()
-        
-        # Format search query for eBay
-        search_url = f"https://www.ebay.com/sch/i.html?_nkw={query.replace(' ', '+')}"
-        
-        time.sleep(random.uniform(1, 3))
-        
-        response = requests.get(search_url, headers=headers, timeout=15)
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.content, 'html.parser')
-        products = []
-        
-        # Find product containers (eBay structure)
-        product_containers = soup.find_all('div', class_='s-item__wrapper')
-        
-        for container in product_containers[:max_results]:
-            try:
-                product = extract_ebay_product_data(container)
-                if product.title:
-                    products.append(product)
-            except Exception as e:
-                logger.warning(f"Error extracting eBay product data: {str(e)}")
-                continue
-        
-        if not products:
-            return "No products found on eBay for the given search query."
-        
-        return format_products_as_text(products)
-        
-    except Exception as e:
-        logger.error(f"Error searching eBay: {str(e)}")
-        return f"Error searching eBay: {str(e)}"
-
-
-def extract_ebay_product_data(container) -> ProductData:
-    """
-    Extract product data from eBay product container
-    """
-    product = ProductData()
-    product.platform = "eBay"
-    
-    try:
-        # Extract title
-        title_element = container.find('h3', class_='s-item__title')
-        if title_element:
-            product.title = title_element.get_text(strip=True)
-        
-        # Extract price
-        price_element = container.find('span', class_='s-item__price')
-        if price_element:
-            product.price = price_element.get_text(strip=True)
-        
-        # Extract product URL
-        link_element = container.find('a', class_='s-item__link')
-        if link_element:
-            product.product_url = link_element.get('href', '')
-        
-        # Extract image
-        img_element = container.find('img')
-        if img_element:
-            product.image_url = img_element.get('src', '')
-        
-        # Extract condition/shipping
-        condition_element = container.find('span', class_='s-item__subtitle')
-        if condition_element:
-            product.availability = condition_element.get_text(strip=True)
-        
-    except Exception as e:
-        logger.warning(f"Error extracting eBay product data: {str(e)}")
-    
-    return product
-
+#     return formatted_text
 
 def format_products_as_text(products: List[ProductData]) -> str:
     """
-    Format product data as readable text
+    Format product data as readable text, ensuring essential fields are present.
     """
     if not products:
         return "No products found."
+
+    valid_products = [p for p in products if p.title and p.product_url]
+    if not valid_products:
+        return "No valid product data to format."
+
+    formatted_text = f"Found {len(valid_products)} products:\n\n"
     
-    formatted_text = f"Found {len(products)} products:\n\n"
-    
-    for i, product in enumerate(products, 1):
+    for i, product in enumerate(valid_products, 1):
         formatted_text += f"--- Product {i} ---\n"
         formatted_text += f"Title: {product.title}\n"
         
@@ -718,30 +787,94 @@ def format_products_as_text(products: List[ProductData]) -> str:
         
         if product.rating:
             formatted_text += f"Rating: {product.rating}"
-            if product.reviews_count:
-                formatted_text += f" ({product.reviews_count})"
-            formatted_text += "\n"
+            if product.reviews_count and product.reviews_count != "0": # Avoid " (0)"
+                formatted_text += f" ({product.reviews_count} reviews)\n"
+            else:
+                formatted_text += "\n" # End line if no review count
         
         if product.availability:
             formatted_text += f"Availability: {product.availability}\n"
         
+        if product.seller:
+            formatted_text += f"Seller: {product.seller}\n"
+
         if product.platform:
             formatted_text += f"Platform: {product.platform}\n"
         
         if product.product_url:
             formatted_text += f"URL: {product.product_url}\n"
         
+        if product.description: # Added description to output
+            formatted_text += f"Description: {product.description}\n"
+
         formatted_text += "\n"
     
     return formatted_text
 
+def fetch_product_information_serpapi(query: str, platforms: Optional[List[str]] = None, max_results_per_platform: int = 3) -> str:
+    """
+    High-level function to fetch product information using SerpAPI and format it.
+    This is intended to be the primary function called by the router.
+    """
+    if not SERPAPI_API_KEY:
+        logger.error("SerpAPI key is not available. Cannot fetch product information.")
+        return "Error: SerpAPI key not configured."
 
-# Legacy function names for backward compatibility
-def scrape_website(query: str) -> str:
+    logger.info(f"Fetching product information for query: '{query}' using SerpAPI.")
+    manager = ScraperPoolManager(serpapi_key=SERPAPI_API_KEY)
+
+    product_data_list = manager.search_and_optionally_scrape(
+        query,
+        platforms=platforms or ['google_shopping', 'amazon'],
+        max_results_per_platform=max_results_per_platform
+    )
+
+    if not product_data_list:
+        logger.info(f"No product data found by ScraperPoolManager for query: '{query}'.")
+        return "No products found matching your query."
+
+    formatted_text = format_products_as_text(product_data_list)
+    logger.info(f"Formatted product information for query: '{query}'. Length: {len(formatted_text)}")
+    return formatted_text
+
+
+# Updated search_products to use the new SerpAPI powered fetch function
+def search_products(query: str, platform: str = "google_shopping,amazon", max_results: int = 3) -> str:
     """
-    Backward compatibility function - now searches for products
+    Search for products using the query and return formatted results.
+    'platform' can be a comma-separated list of platforms like 'google_shopping,amazon'.
+    This function now primarily uses fetch_product_information_serpapi.
+    The 'max_results' here means max_results_per_platform.
     """
-    return search_products(query)
+    logger.info(f"search_products (new) called for query: '{query}', platform(s): '{platform}'")
+
+    platform_list = [p.strip().lower() for p in platform.split(',') if p.strip()]
+    if not platform_list:
+        platform_list = ['google_shopping', 'amazon']
+
+    return fetch_product_information_serpapi(query, platforms=platform_list, max_results_per_platform=max_results)
+
+
+# Legacy function names for backward compatibility - these might need review if they are still used elsewhere directly
+def scrape_website(query_or_url: str) -> str:
+    """
+    Backward compatibility function.
+    If it's a URL, it tries to detect platform and scrape.
+    If it's a query, it uses the new search_products flow.
+    """
+    parsed_url = urlparse(query_or_url)
+    if parsed_url.scheme and parsed_url.netloc:
+        logger.info(f"scrape_website called with URL: {query_or_url}. Attempting direct scrape.")
+        if not SERPAPI_API_KEY:
+             logger.error("SerpAPI key is not available. Cannot initialize ScraperPoolManager for direct scraping.")
+             return "Error: SerpAPI key not configured for scraping."
+        manager = ScraperPoolManager(serpapi_key=SERPAPI_API_KEY)
+        # Note: scrape_urls expects a list of URLs.
+        product_data = manager.scrape_urls([query_or_url])
+        return format_products_as_text(product_data)
+    else:
+        logger.info(f"scrape_website called with query: {query_or_url}. Using new search_products.")
+        return search_products(query_or_url) # platform and max_results will use defaults
 
 
 def extract_body_content(html_content: str) -> str:

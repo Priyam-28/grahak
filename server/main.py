@@ -5,7 +5,11 @@ from typing import List
 import uvicorn
 import logging
 import asyncio
+from dotenv import load_dotenv # Added for .env loading
 from routers.findproduct import router as findproduct_router
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configure logging to suppress the connection error
 logging.getLogger("uvicorn.error").setLevel(logging.CRITICAL)

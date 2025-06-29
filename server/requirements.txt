@@ -10,10 +10,17 @@ playwright
 fastapi
 uvicorn
 pydantic
-langchain-ollama
-langchain-core
 python-multipart
 murf
 crawl4ai
 fake-useragent
 serpapi
+python-dotenv
+langchain
+langchain-community
+langchain-core
+langchain-ollama
+# faiss-cpu # Removed, ChromaDB will be used
+# sentence-transformers # Removed to save space, will use OllamaEmbeddings
+tavily-python
+chromadb

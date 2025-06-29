@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+*.egg-info/
+.installed.cfg
+*.egg
+instance/
+.webassets-cache/
+.hypothesis/
+MANIFEST
+
+# Node.js (for client directory)
+client/node_modules/
+client/.next/
+client/out/
+client/.DS_Store
+client/*.log
+client/npm-debug.log*
+client/yarn-debug.log*
+client/yarn-error.log*
+client/lerna-debug.log*
+client/.pnp/
+client/.pnp.js
+
+# Server specific
+server/.env
+server/venv/
+server/instance/
+
+# IDE / Editor specific
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
