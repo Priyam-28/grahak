@@ -1,25 +1,18 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Header
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import List, Optional
 import asyncio
 import json
 import logging
-import asyncio
-import json
-import logging
-import uuid # Added for session ID generation
+import uuid
 from typing import List, Optional, Tuple, Dict, Any
-
-from fastapi import APIRouter, HTTPException, Header
-from fastapi.responses import StreamingResponse # Keep for potential future use
 from pydantic import BaseModel
-
-# New imports for RAG and session management
 from utils.session_manager import SessionManager, SessionData
 from utils.web_search_handler import fetch_and_scrape_tavily_results
 from utils.llm_formatter import generate_formatted_response
-from utils.scraper import ProductData # To type hint lists of products
+from utils.scraper import SerpAPIIntegration, ScraperPoolManager, ProductData, SERPAPI_API_KEY
+from utils.parser import get_llm_summary, stream_llm_summary, parse_with_ollama
+
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -135,10 +128,24 @@ async def process_chat_query_with_rag(
         "session_id": session_id_str # Return session_id so client can maintain it
     }
 
-# --- Old Endpoints (Commented Out/Removed) ---
-# The old /search, /parse, and process_product_query are superseded by the new chat flow.
-# The old /chat-stream also needs a significant rework for the new RAG logic;
-# for now, we will focus on making /chat work with the new RAG pipeline.
+# --- Helper function to format ProductData for LLM ---
+def format_product_data_for_llm(products: List[ProductData]) -> str:
+    if not products:
+        return "No products found."
+
+    text_parts = ["Here is a list of products found:\n"]
+    for i, p in enumerate(products):
+        text_parts.append(f"\n--- Product {i+1} ---")
+        text_parts.append(f"Title: {p.title if p.title else 'N/A'}")
+        text_parts.append(f"Price: {p.price if p.price else 'N/A'}")
+        if p.platform:
+            text_parts.append(f"Source: {p.platform}")
+        if p.description:
+            # Keep description concise for the LLM context
+            desc_snippet = (p.description[:200] + '...') if len(p.description) > 200 else p.description
+            text_parts.append(f"Description: {desc_snippet}")
+        # Not including image_url or raw_data in the text for LLM
+    return "\n".join(text_parts)
 
 @router.post("/chat")
 async def chat_with_products_rag(
@@ -170,61 +177,6 @@ async def chat_with_products_rag(
             "products": processed_data.get("products", []),
             "session_id": processed_data.get("session_id"), # Send back the session_id used
             "message": "Products found successfully"
-        }
-        
-    except asyncio.CancelledError:
-#     """Search for products and return cleaned content"""
-#     try:
-#         # This would need to be updated to use process_product_query or similar
-#         # For now, focusing on the /chat endpoint
-#         # search_results = await asyncio.wait_for(
-#         #     asyncio.to_thread(search_products, request.query, "google_shopping,amazon", 3),
-#         #     timeout=60.0
-#         # )
-#         # return {
-#         #     "success": True,
-#         #     "content": "This endpoint is under review. Please use /chat.",
-#         #     "message": "Product search completed successfully"
-#         # }
-#         raise HTTPException(status_code=501, detail="This endpoint is currently not implemented. Please use /chat.")
-#     except asyncio.TimeoutError:
-#         raise HTTPException(status_code=408, detail="Request timeout - search took too long to respond")
-#     except Exception as e:
-#         logger.error(f"Error searching for products: {str(e)}")
-#         raise HTTPException(status_code=500, detail=f"Error searching for products: {str(e)}")
-
-# @router.post("/parse") # Commenting out as it's likely deprecated by the new /chat flow
-# async def parse_content(request: ParseRequest):
-#     """Search for products and parse for specific criteria"""
-#     try:
-#         # logger.info(f"Parse request received for query: {request.query}")
-#         # result = await process_product_query(request.query) # Old safe_search_and_parse was different
-#         # return {
-#         #     "success": True,
-#         #     "result": result.get("llm_summary"), # Or adapt to new structure
-#         #     "message": "Content parsed successfully"
-#         # }
-#         raise HTTPException(status_code=501, detail="This endpoint is currently not implemented. Please use /chat.")
-#     except Exception as e:
-#         logger.error(f"Error parsing content: {str(e)}")
-#         raise HTTPException(status_code=500, detail=f"Error parsing content: {str(e)}")
-
-@router.post("/chat")
-async def chat_with_products(request: ChatRequest):
-    """Chat interface for finding products. Returns LLM summary and a list of products."""
-    try:
-        if not request.query:
-            raise HTTPException(status_code=400, detail="Search query is required")
-        
-        logger.info(f"Chat request received for query: {request.query}")
-        
-        processed_data = await process_product_query(request.query)
-        
-        return {
-            "success": True,
-            "llm_summary": processed_data.get("llm_summary"),
-            "products": processed_data.get("products", []),
-            "message": "Products found successfully" # Or a more dynamic message
         }
         
     except asyncio.CancelledError:
@@ -326,7 +278,6 @@ async def chat_stream_endpoint(request: ChatRequest):
     
     return StreamingResponse(
         stream_generator(),
-        # generate_response(), # Corrected: Removed duplicate/old generator
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

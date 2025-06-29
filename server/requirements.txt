@@ -20,7 +20,7 @@ langchain
 langchain-community
 langchain-core
 langchain-ollama
-# faiss-cpu # Removed, ChromaDB will be used
-# sentence-transformers # Removed to save space, will use OllamaEmbeddings
 tavily-python
 chromadb
+tavily-python
+

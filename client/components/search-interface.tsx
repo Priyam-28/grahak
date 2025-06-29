@@ -1,13 +1,13 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 "use client"
 
-import type React from "react"
+import React from "react"
 import { useState, useRef, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Loader2, Search, MessageCircle, Sparkles, AlertCircle, ArrowLeft } from "lucide-react"
+import { Loader2, Search, MessageCircle, AlertCircle, ArrowLeft } from "lucide-react"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
 import { VoiceInput } from "@/components/voice-input"
@@ -233,59 +233,54 @@ export function SearchInterface() {
               <CardContent className="p-6">
                 <div className="space-y-4 max-h-96 overflow-y-auto">
                   {messages.map((message, index) => (
-                    <div
-                      key={index}
-                      className={cn("flex gap-3", message.role === "user" ? "justify-end" : "justify-start")}
-                    >
+                    <React.Fragment key={index}>
                       <div
-                        className={cn(
-                          "max-w-[80%] p-4 rounded-xl",
-                          message.role === "user"
-                            ? "gradient-primary text-white glow-primary"
-                            : "glass-card border-primary/20",
-                        )}
+                        className={cn("flex gap-3", message.role === "user" ? "justify-end" : "justify-start")}
                       >
-                        <div className="flex items-start gap-2">
-                          {message.role === "assistant" && (
-                            <MessageCircle className="w-4 h-4 text-primary mt-0.5 flex-shrink-0" />
+                        <div
+                          className={cn(
+                            "max-w-[80%] p-4 rounded-xl",
+                            message.role === "user"
+                              ? "gradient-primary text-white glow-primary"
+                              : "glass-card border-primary/20",
                           )}
+                        >
                           <div className="flex-1">
                              <p className="text-sm leading-relaxed whitespace-pre-wrap mb-2">{message.content}</p>
                             {message.audio && <AudioPlayer audioBase64={message.audio} autoPlay={voiceEnabled} />}
                           </div>
                         </div>
                       </div>
+                    {/* Render Product Cards if they exist for an assistant message */}
+                    {message.role === "assistant" && message.products && message.products.length > 0 && (
+                      <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 px-2 py-2 -mx-2 max-h-96 overflow-y-auto">
+                        {message.products.map((product, pIndex) => (
+                          <ProductCard key={`${index}-${pIndex}`} {...product} />
+                        ))}
+                      </div>
+                    )}
+                    </React.Fragment>
+                  ))}
+                  {loading && (
+                    <div className="flex justify-start">
+                      <div className="glass-card border-primary/20 p-4 rounded-xl">
+                        <div className="flex items-center gap-2">
+                          <Loader2 className="w-4 h-4 text-primary animate-spin" />
+                          <span className="text-sm">
+                            {voiceEnabled ? "Searching and generating audio..." : "Searching for products..."}
+                          </span>
+                        </div>
+                      </div>
                     </div>
-+                    {/* Render Product Cards if they exist for an assistant message */}
-+                    {message.role === "assistant" && message.products && message.products.length > 0 && (
-+                      <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 px-2 py-2 -mx-2 max-h-96 overflow-y-auto">
-+                        {message.products.map((product, pIndex) => (
-+                          <ProductCard key={`${index}-${pIndex}`} {...product} />
-+                        ))}
-+                      </div>
-+                    )}
-+                  </React.Fragment>
-+                  ))}
-+                  {loading && (
-+                    <div className="flex justify-start">
-+                      <div className="glass-card border-primary/20 p-4 rounded-xl">
-+                        <div className="flex items-center gap-2">
-+                          <Loader2 className="w-4 h-4 text-primary animate-spin" />
-+                          <span className="text-sm">
-+                            {voiceEnabled ? "Searching and generating audio..." : "Searching for products..."}
-+                          </span>
-+                        </div>
-+                      </div>
-+                    </div>
-+                  )}
-+                </div>
-+              </CardContent>
-+            </Card>
-+          )}
-+
-+          {/* Query Input - This is now the main search input */}
-+          <Card className="glass-card">
-+            <CardHeader>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Query Input - This is now the main search input */}
+          <Card className="glass-card">
+            <CardHeader>
               <CardTitle className="flex items-center gap-2 text-base"> {/* Adjusted title size */}
                 <Search className="w-5 h-5 text-primary" />
                 What product are you looking for?
