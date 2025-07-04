@@ -4,7 +4,7 @@ import time
 import random
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Union
-from langchain_tavily import TavilySearchResults
+from langchain_tavily import TavilySearch
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -20,10 +20,13 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Load Tavily API key from environment variable
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY") or "tvly-YOUR_API_KEY_HERE"
-if not TAVILY_API_KEY or TAVILY_API_KEY == "tvly-YOUR_API_KEY_HERE":
-    logger.warning("TAVILY_API_KEY environment variable not found. Tavily calls will fail.")
+# Load environment variables
+load_dotenv()
+
+# Load Tavily API key from environment variable with fallback
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+if not TAVILY_API_KEY:
+    logger.warning("TAVILY_API_KEY environment variable not found. Make sure to set it in your .env file.")
 
 @dataclass
 class ScrapingConfig:
@@ -301,7 +304,7 @@ class TavilyIntegration:
     
     def __init__(self, api_key: str):
         self.api_key = api_key
-        self.search_tool = TavilySearchResults(api_key=api_key)
+        self.search_tool = TavilySearch(tavily_api_key=api_key)  # Changed to use tavily_api_key parameter
     
     def search_products(self, query: str, max_results: int = 10, **kwargs) -> List[Dict]:
         """Search for products using Tavily"""
@@ -309,21 +312,26 @@ class TavilyIntegration:
             # Build a comprehensive search query for products
             product_query = f"{query} price comparison review specifications buy"
             
-            # Use Tavily to search
+            # Use Tavily to search with search_depth=2 for more detailed results
             results = self.search_tool.invoke({
                 "query": product_query,
-                "max_results": max_results,
+                "k": max_results,
+                "search_depth": "advanced",  # Use advanced search for product queries
+                "include_raw_content": True,  # Get full content when available
+                "include_images": True,       # Try to get product images
                 **kwargs
             })
             
-            # Tavily returns a list of dictionaries with 'url' and 'content' keys
+            # Tavily returns a list of dictionaries with search results
             formatted_results = []
-            for result in results:
+            for result in results.get("results", []):
                 formatted_results.append({
                     "title": result.get("title", ""),
                     "url": result.get("url", ""),
                     "content": result.get("content", ""),
-                    "score": result.get("score", 0)
+                    "score": result.get("score", 0),
+                    "raw_content": result.get("raw_content", ""),
+                    "image_url": result.get("image_url", "")
                 })
             
             return formatted_results
@@ -492,7 +500,9 @@ class ScraperPoolManager:
         title = result.get("title", "")
         url = result.get("url", "")
         content = result.get("content", "")
+        raw_content = result.get("raw_content", "")  # Get the raw content if available
         score = result.get("score", 0)
+        image_url = result.get("image_url", "")
 
         if not title or not url:
             return None
@@ -515,8 +525,8 @@ class ScraperPoolManager:
             title=str(title),
             price=str(price),
             rating=str(rating),
-            image_url="",  # Tavily doesn't typically return image URLs
-            description=str(content)[:200] + "..." if len(content) > 200 else str(content),
+            image_url=str(image_url),  # Use image URL from Tavily when available
+            description=str(raw_content or content)[:200] + "..." if len(raw_content or content) > 200 else str(raw_content or content),
             availability="",  # Not available in search results
             reviews_count="",  # Not available in search results
             seller="",  # Not available in search results
