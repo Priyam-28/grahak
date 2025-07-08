@@ -18,3 +18,4 @@ langchain-ollama
 langchain-tavily>=0.2.6
 chromadb
 tavily-python
+firecrawl-py

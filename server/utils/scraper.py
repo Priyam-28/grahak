@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 import fake_useragent
 import os
 from dotenv import load_dotenv
+from firecrawl import FirecrawlApp # Added Firecrawl
 
 # Load environment variables
 load_dotenv()
@@ -23,10 +24,14 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
-# Load Tavily API key from environment variable with fallback
+# Load API keys from environment variables with fallback
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY")
+
 if not TAVILY_API_KEY:
     logger.warning("TAVILY_API_KEY environment variable not found. Make sure to set it in your .env file.")
+if not FIRECRAWL_API_KEY:
+    logger.warning("FIRECRAWL_API_KEY environment variable not found. Make sure to set it in your .env file.")
 
 @dataclass
 class ScrapingConfig:
@@ -45,15 +50,19 @@ class ProductData:
     """Standardized product data structure"""
     title: str = ""
     price: str = ""
-    rating: str = ""
+    currency: str = "INR" # Assuming Indian Rupees
+    rating: str = "" # e.g., "4.5 out of 5 stars"
     image_url: str = ""
-    description: str = ""
+    description: str = "" # Detailed description
+    short_summary: str = "" # A brief summary
     availability: str = ""
     reviews_count: str = ""
+    reviews: List[str] = field(default_factory=list) # List of review texts
     seller: str = ""
     product_url: str = ""
-    platform: str = ""
-    raw_data: Dict[str, Any] = field(default_factory=dict)
+    platform: str = "" # e.g., Amazon, Flipkart, Myntra
+    raw_data: Dict[str, Any] = field(default_factory=dict) # Raw data from Firecrawl or Tavily
+    llm_parsed_data: Dict[str, Any] = field(default_factory=dict) # Data specifically from LLM parsing
 
 
 class ProxyManager:
@@ -165,36 +174,29 @@ class AmazonScrapingStrategy(SiteScrapingStrategy):
         """Extract Amazon product data"""
         product = ProductData(platform="Amazon", product_url=url)
         
-        # Title
         title_elem = soup.select_one(self.config.selectors['title'])
         product.title = title_elem.get_text(strip=True) if title_elem else ""
         
-        # Price
         price_elem = soup.select_one(self.config.selectors['price'])
         product.price = price_elem.get_text(strip=True) if price_elem else ""
         
-        # Rating
         rating_elem = soup.select_one(self.config.selectors['rating'])
         if rating_elem:
             rating_text = rating_elem.get('alt', '') or rating_elem.get_text(strip=True)
             product.rating = rating_text.split()[0] if rating_text else ""
         
-        # Image
         img_elem = soup.select_one(self.config.selectors['image'])
         if img_elem:
             product.image_url = img_elem.get('src') or img_elem.get('data-src', '')
         
-        # Description
         desc_elem = soup.select_one(self.config.selectors['description'])
         if desc_elem:
             desc_items = desc_elem.find_all('li')
             product.description = ' '.join([li.get_text(strip=True) for li in desc_items[:3]])
         
-        # Availability
         avail_elem = soup.select_one(self.config.selectors['availability'])
         product.availability = avail_elem.get_text(strip=True) if avail_elem else ""
         
-        # Reviews count
         reviews_elem = soup.select_one(self.config.selectors['reviews_count'])
         if reviews_elem:
             reviews_text = reviews_elem.get_text()
@@ -227,28 +229,22 @@ class FlipkartScrapingStrategy(SiteScrapingStrategy):
         """Extract Flipkart product data"""
         product = ProductData(platform="Flipkart", product_url=url)
         
-        # Title
         title_elem = soup.select_one(self.config.selectors['title'])
         product.title = title_elem.get_text(strip=True) if title_elem else ""
         
-        # Price
         price_elem = soup.select_one(self.config.selectors['price'])
         product.price = price_elem.get_text(strip=True) if price_elem else ""
         
-        # Rating
         rating_elem = soup.select_one(self.config.selectors['rating'])
         product.rating = rating_elem.get_text(strip=True) if rating_elem else ""
         
-        # Image
         img_elem = soup.select_one(self.config.selectors['image'])
         if img_elem:
             product.image_url = img_elem.get('src') or img_elem.get('data-src', '')
         
-        # Description
         desc_elem = soup.select_one(self.config.selectors['description'])
         product.description = desc_elem.get_text(strip=True) if desc_elem else ""
         
-        # Availability
         avail_elem = soup.select_one(self.config.selectors['availability'])
         product.availability = avail_elem.get_text(strip=True) if avail_elem else ""
         
@@ -279,19 +275,15 @@ class MyntraScrapingStrategy(SiteScrapingStrategy):
         """Extract Myntra product data"""
         product = ProductData(platform="Myntra", product_url=url)
         
-        # Title
         title_elem = soup.select_one(self.config.selectors['title'])
         product.title = title_elem.get_text(strip=True) if title_elem else ""
         
-        # Price
         price_elem = soup.select_one(self.config.selectors['price'])
         product.price = price_elem.get_text(strip=True) if price_elem else ""
         
-        # Rating
         rating_elem = soup.select_one(self.config.selectors['rating'])
         product.rating = rating_elem.get_text(strip=True) if rating_elem else ""
         
-        # Image
         img_elem = soup.select_one(self.config.selectors['image'])
         if img_elem:
             product.image_url = img_elem.get('src') or img_elem.get('data-src', '')
@@ -304,54 +296,45 @@ class TavilyIntegration:
     
     def __init__(self, api_key: str):
         self.api_key = api_key
-        self.search_tool = TavilySearch(tavily_api_key=api_key)  # Changed to use tavily_api_key parameter
+        self.search_tool = TavilySearch(tavily_api_key=api_key)
     
     def search_products(self, query: str, max_results: int = 10, **kwargs) -> List[Dict]:
         """Search for products using Tavily"""
         try:
-            # Build a comprehensive search query for products
             product_query = f"{query} price comparison review specifications buy"
-            
-            # Use Tavily to search with search_depth=2 for more detailed results
             results = self.search_tool.invoke({
                 "query": product_query,
                 "k": max_results,
-                "search_depth": "advanced",  # Use advanced search for product queries
-                "include_raw_content": True,  # Get full content when available
-                "include_images": True,       # Try to get product images
+                "search_depth": "advanced",
+                "include_raw_content": True,
+                "include_images": True,
                 **kwargs
             })
-            
-            # Tavily returns a list of dictionaries with search results
             formatted_results = []
-            for result in results.get("results", []):
-                formatted_results.append({
-                    "title": result.get("title", ""),
-                    "url": result.get("url", ""),
-                    "content": result.get("content", ""),
-                    "score": result.get("score", 0),
-                    "raw_content": result.get("raw_content", ""),
-                    "image_url": result.get("image_url", "")
-                })
-            
+            if results and "results" in results:
+                for result in results["results"]:
+                    formatted_results.append({
+                        "title": result.get("title", ""),
+                        "url": result.get("url", ""),
+                        "content": result.get("content", ""),
+                        "score": result.get("score", 0),
+                        "raw_content": result.get("raw_content", ""),
+                        "image_url": result.get("image_url", "")
+                    })
             return formatted_results
-            
         except Exception as e:
             logger.error(f"Tavily search error: {e}")
             return []
-    
+
     def search_amazon(self, query: str, **kwargs) -> List[Dict]:
-        """Search Amazon specifically"""
         amazon_query = f"{query} site:amazon.com OR site:amazon.in"
         return self.search_products(amazon_query, **kwargs)
     
     def search_flipkart(self, query: str, **kwargs) -> List[Dict]:
-        """Search Flipkart specifically"""
         flipkart_query = f"{query} site:flipkart.com"
         return self.search_products(flipkart_query, **kwargs)
     
     def search_general_shopping(self, query: str, **kwargs) -> List[Dict]:
-        """Search general shopping sites"""
         shopping_query = f"{query} buy online price comparison review"
         return self.search_products(shopping_query, **kwargs)
 
@@ -359,17 +342,24 @@ class TavilyIntegration:
 class ScraperPoolManager:
     """Main scraper pool manager"""
     
-    def __init__(self, tavily_key: Optional[str] = TAVILY_API_KEY, max_workers: int = 5):
+    def __init__(self, tavily_key: Optional[str] = TAVILY_API_KEY, firecrawl_key: Optional[str] = FIRECRAWL_API_KEY, max_workers: int = 5):
         self.proxy_manager = ProxyManager()
         self.fingerprint_manager = BrowserFingerprintManager()
+
         if not tavily_key:
             logger.error("Tavily API key is not configured. ScraperPoolManager cannot use Tavily.")
             self.tavily = None
         else:
             self.tavily = TavilyIntegration(tavily_key)
+
+        if not firecrawl_key:
+            logger.error("Firecrawl API key is not configured. ScraperPoolManager cannot use Firecrawl.")
+            self.firecrawl_client = None
+        else:
+            self.firecrawl_client = FirecrawlApp(api_key=firecrawl_key)
+
         self.max_workers = max_workers
         
-        # Initialize scraping strategies
         self.strategies = {
             'amazon': AmazonScrapingStrategy(),
             'flipkart': FlipkartScrapingStrategy(),
@@ -377,246 +367,154 @@ class ScraperPoolManager:
         }
     
     def _detect_platform(self, url: str) -> str:
-        """Detect platform from URL"""
         domain = urlparse(url).netloc.lower()
+        if 'amazon' in domain: return 'amazon'
+        if 'flipkart' in domain: return 'flipkart'
+        if 'myntra' in domain: return 'myntra'
+        return 'generic'
+
+    def _scrape_single_url_with_firecrawl(self, url: str) -> Optional[Dict[str, Any]]:
+        if not self.firecrawl_client:
+            logger.error(f"Firecrawl client not initialized. Cannot scrape {url}.")
+            return None
         
-        if 'amazon' in domain:
-            return 'amazon'
-        elif 'flipkart' in domain:
-            return 'flipkart'
-        elif 'myntra' in domain:
-            return 'myntra'
-        else:
-            return 'generic'
-    
-    def _scrape_single_url(self, url: str, strategy: SiteScrapingStrategy) -> Optional[ProductData]:
-        """Scrape a single URL with retries and error handling"""
-        headers = self.fingerprint_manager.get_headers(strategy.config.site_name)
-        
-        for attempt in range(strategy.config.max_retries):
-            try:
-                # Get proxy if enabled
-                proxy = self.proxy_manager.get_proxy() if strategy.config.use_proxies else None
-                
-                # Add random delay
-                delay = random.uniform(*strategy.config.delay_range)
-                time.sleep(delay)
-                
-                # Make request
-                response = requests.get(
-                    url,
-                    headers=headers,
-                    proxies=proxy,
-                    timeout=strategy.config.timeout,
-                    allow_redirects=True
-                )
-                response.raise_for_status()
-                
-                # Parse and extract data
-                soup = BeautifulSoup(response.text, 'html.parser')
-                product_data = strategy.extract_data(soup, url)
-                
-                logger.info(f"Successfully scraped: {url}")
-                return product_data
-                
-            except requests.RequestException as e:
-                logger.warning(f"Attempt {attempt + 1} failed for {url}: {e}")
-                
-                if proxy and "proxy" in str(e).lower():
-                    self.proxy_manager.remove_proxy(proxy)
-                
-                if attempt == strategy.config.max_retries - 1:
-                    logger.error(f"Failed to scrape {url} after {strategy.config.max_retries} attempts")
-        
-        return None
-    
-    def scrape_urls(self, urls: List[str]) -> List[ProductData]:
-        """Scrape multiple URLs concurrently"""
-        results = []
-        
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_url = {}
+        logger.info(f"Attempting to scrape with Firecrawl: {url}")
+        try:
+            params = {'pageOptions': {'onlyMainContent': True}}
+            scraped_data = self.firecrawl_client.scrape_url(url, params=params)
             
-            for url in urls:
-                platform = self._detect_platform(url)
-                strategy = self.strategies.get(platform)
-                
-                if strategy:
-                    future = executor.submit(self._scrape_single_url, url, strategy)
-                    future_to_url[future] = url
-                else:
-                    logger.warning(f"No strategy found for platform: {platform}")
+            if scraped_data and ('markdown' in scraped_data or 'content' in scraped_data or 'llm_extraction' in scraped_data):
+                logger.info(f"Successfully scraped with Firecrawl: {url}")
+                scraped_data['product_url'] = url
+                scraped_data['platform_detected'] = self._detect_platform(url)
+                return scraped_data
+            elif scraped_data and 'error' in scraped_data:
+                 logger.warning(f"Firecrawl returned an error for {url}. Error: {scraped_data.get('error')}")
+                 return None
+            else:
+                logger.warning(f"Firecrawl returned no significant content or known error for {url}. Data: {scraped_data}")
+                return None
+        except Exception as e:
+            logger.error(f"Firecrawl scraping failed for {url}: {e}")
+            return None
+
+    def scrape_and_parse_urls(self, urls: List[str], user_query: str) -> List[ProductData]:
+        raw_firecrawl_data_list: List[Dict[str, Any]] = []
+        parsed_product_data_list: List[ProductData] = []
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            future_to_url = {executor.submit(self._scrape_single_url_with_firecrawl, url): url for url in urls}
             
             for future in as_completed(future_to_url):
                 url = future_to_url[future]
                 try:
                     result = future.result()
                     if result:
-                        results.append(result)
+                        raw_firecrawl_data_list.append(result)
                 except Exception as e:
-                    logger.error(f"Error processing {url}: {e}")
+                    logger.error(f"Error processing future for Firecrawl result of {url}: {e}")
         
-        return results
-    
-    def search_and_scrape(self, query: str, platforms: List[str] = None) -> List[ProductData]:
-        """Search using Tavily and scrape the results"""
-        if not self.tavily:
-            logger.error("Tavily API key not provided")
-            return []
-        
-        platforms = platforms or ['amazon', 'general_shopping']
-        all_results = []
-        
-        for platform in platforms:
-            try:
-                if platform == 'amazon':
-                    search_results = self.tavily.search_amazon(query, max_results=10)
-                elif platform == 'flipkart':
-                    search_results = self.tavily.search_flipkart(query, max_results=10)
-                else:
-                    search_results = self.tavily.search_general_shopping(query, max_results=10)
-                
-                # Extract URLs from search results
-                urls = []
-                for result in search_results[:10]:  # Limit to top 10 results
-                    url = result.get('url')
-                    if url:
-                        urls.append(url)
-                
-                # Scrape the URLs
-                scraped_data = self.scrape_urls(urls)
-                all_results.extend(scraped_data)
-                
-            except Exception as e:
-                logger.error(f"Error searching {platform}: {e}")
-        
-        return all_results
-
-    def get_product_data_from_tavily_result(self, result: Dict, platform_hint: str) -> Optional[ProductData]:
-        """
-        Extracts ProductData from a single Tavily result item.
-        This is useful for extracting structured data from Tavily search results.
-        """
-        title = result.get("title", "")
-        url = result.get("url", "")
-        content = result.get("content", "")
-        raw_content = result.get("raw_content", "")  # Get the raw content if available
-        score = result.get("score", 0)
-        image_url = result.get("image_url", "")
-
-        if not title or not url:
-            return None
-
-        # Try to extract price from content using basic regex
-        import re
-        price_match = re.search(r'[\$₹]\s*[\d,]+(?:\.\d{2})?', content)
-        price = price_match.group() if price_match else ""
-
-        # Try to extract rating from content
-        rating_match = re.search(r'(\d+\.?\d*)\s*(?:out of|/)\s*5|(\d+\.?\d*)\s*star', content, re.IGNORECASE)
-        rating = rating_match.group(1) or rating_match.group(2) if rating_match else ""
-
-        # Detect platform from URL
-        detected_platform = self._detect_platform(url)
-        if detected_platform != 'generic':
-            platform_hint = detected_platform.title()
-
-        return ProductData(
-            title=str(title),
-            price=str(price),
-            rating=str(rating),
-            image_url=str(image_url),  # Use image URL from Tavily when available
-            description=str(raw_content or content)[:200] + "..." if len(raw_content or content) > 200 else str(raw_content or content),
-            availability="",  # Not available in search results
-            reviews_count="",  # Not available in search results
-            seller="",  # Not available in search results
-            product_url=str(url),
-            platform=platform_hint,
-            raw_data=result
-        )
-
-    def search_and_optionally_scrape(self, query: str, platforms: Optional[List[str]] = None, max_results_per_platform: int = 5) -> List[ProductData]:
-        """
-        Search using Tavily. Extract basic data from search results and optionally scrape for more detailed data.
-        """
-        if not self.tavily:
-            logger.error("Tavily is not initialized in ScraperPoolManager.")
+        if not raw_firecrawl_data_list:
+            logger.info("No data successfully scraped by Firecrawl.")
             return []
 
-        platforms = platforms or ['general_shopping', 'amazon']
-        all_product_data: List[ProductData] = []
-        urls_to_scrape: List[str] = []
-
-        for platform in platforms:
-            try:
-                search_results_raw = []
-                platform_for_data = platform
-                
-                if platform.lower() == 'amazon':
-                    search_results_raw = self.tavily.search_amazon(query, max_results=max_results_per_platform * 2)
-                    platform_for_data = "Amazon"
-                elif platform.lower() == 'flipkart':
-                    search_results_raw = self.tavily.search_flipkart(query, max_results=max_results_per_platform * 2)
-                    platform_for_data = "Flipkart"
-                elif platform.lower() == 'general_shopping':
-                    search_results_raw = self.tavily.search_general_shopping(query, max_results=max_results_per_platform)
-                    platform_for_data = "GeneralShopping"
+        try:
+            from .parser import parse_firecrawl_data_with_ollama
+            logger.info(f"Attempting to parse {len(raw_firecrawl_data_list)} Firecrawl results with Ollama.")
+            for fc_data in raw_firecrawl_data_list:
+                platform_hint = fc_data.get('platform_detected', self._detect_platform(fc_data.get('product_url', '')))
+                parsed_product = parse_firecrawl_data_with_ollama(
+                    firecrawl_data=fc_data,
+                    user_query=user_query,
+                    site_name_hint=platform_hint
+                )
+                if parsed_product:
+                    if not parsed_product.platform:
+                         parsed_product.platform = platform_hint
+                    parsed_product.product_url = fc_data.get('product_url', '')
+                    parsed_product_data_list.append(parsed_product)
                 else:
-                    logger.warning(f"Unsupported platform for Tavily search: {platform}")
-                    continue
+                    logger.warning(f"LLM Parser returned None for URL: {fc_data.get('product_url')}")
+        except ImportError:
+            logger.error("Could not import 'parse_firecrawl_data_with_ollama' from .parser. Returning raw data.")
+            for fc_data in raw_firecrawl_data_list:
+                parsed_product_data_list.append(ProductData(
+                    product_url=fc_data.get('product_url', ''),
+                    platform=fc_data.get('platform_detected', 'generic'),
+                    raw_data=fc_data,
+                    title=fc_data.get('metadata', {}).get('title', 'Title not found in metadata'),
+                    description=fc_data.get('markdown', fc_data.get('content', 'Content not found'))[:1000]
+                ))
+        except Exception as e:
+            logger.error(f"Error during LLM parsing phase: {e}", exc_info=True)
 
-                logger.info(f"Tavily found {len(search_results_raw)} results for '{query}' on {platform}")
+        logger.info(f"scrape_and_parse_urls completed. Returning {len(parsed_product_data_list)} products.")
+        return parsed_product_data_list
 
-                temp_platform_products = []
-                for res in search_results_raw:
-                    # For general shopping, try to extract structured data directly
-                    if platform.lower() == 'general_shopping':
-                        product = self.get_product_data_from_tavily_result(res, platform_for_data)
-                        if product:
-                            temp_platform_products.append(product)
-                    else:
-                        # For Amazon/Flipkart, collect URLs for scraping
+    def _construct_tavily_query(self, base_query: str, site: Optional[str] = None, min_price: Optional[Union[int, float]] = None, max_price: Optional[Union[int, float]] = None) -> str:
+        query_parts = [base_query]
+        price_parts = []
+        if min_price is not None: price_parts.append(f"over {min_price}")
+        if max_price is not None: price_parts.append(f"under {max_price}")
+        if price_parts:
+            price_query = " price " + " and ".join(price_parts)
+            if " and " in price_query and len(price_parts) == 2:
+                 price_query = f" price between {min_price} and {max_price}"
+            query_parts.append(price_query)
+        if min_price is not None or max_price is not None: query_parts.append("rupees")
+        if site:
+            if site.lower() == "amazon": query_parts.append("site:amazon.in")
+            elif site.lower() == "flipkart": query_parts.append("site:flipkart.com")
+            elif site.lower() == "myntra": query_parts.append("site:myntra.com")
+        final_query = " ".join(query_parts)
+        logger.info(f"Constructed Tavily query: {final_query}")
+        return final_query
+
+    def search_for_products_and_parse(self,
+                                     user_query: str,
+                                     target_sites: List[str],
+                                     min_price: Optional[Union[int, float]] = None,
+                                     max_price: Optional[Union[int, float]] = None,
+                                     max_results_per_site: int = 3) -> List[ProductData]:
+        if not self.tavily: logger.error("Tavily is not initialized."); return []
+        if not self.firecrawl_client: logger.error("Firecrawl client is not initialized."); return []
+
+        unique_urls = set()
+        for site_key in target_sites:
+            site_name = site_key.lower()
+            tavily_search_query = self._construct_tavily_query(user_query, site_name, min_price, max_price)
+            try:
+                logger.info(f"Searching Tavily for '{tavily_search_query}' on site '{site_name}'")
+                search_results_raw = self.tavily.search_products(query=tavily_search_query, max_results=max_results_per_site * 2)
+                if search_results_raw:
+                    logger.info(f"Tavily found {len(search_results_raw)} results for query targeting {site_name}.")
+                    count = 0
+                    for res in search_results_raw:
                         url = res.get('url')
                         if url:
-                            # Basic filter for platform-specific URLs
                             domain = urlparse(url).netloc.lower()
-                            if ((platform.lower() == 'amazon' and 'amazon' in domain) or 
-                                (platform.lower() == 'flipkart' and 'flipkart' in domain) or
-                                (platform.lower() == 'general_shopping')):
-                                
-                                if url not in urls_to_scrape:
-                                    urls_to_scrape.append(url)
-
-                all_product_data.extend(temp_platform_products[:max_results_per_platform])
-
+                            if site_name == "amazon" and "amazon.in" not in domain and "amazon.com" not in domain : continue
+                            if site_name == "flipkart" and "flipkart.com" not in domain: continue
+                            if site_name == "myntra" and "myntra.com" not in domain: continue
+                            if url not in unique_urls:
+                                unique_urls.add(url)
+                                count += 1
+                                if count >= max_results_per_site: break
             except Exception as e:
-                logger.error(f"Error during Tavily search for {platform}: {e}")
+                logger.error(f"Error during Tavily search for site {site_name} with query '{tavily_search_query}': {e}")
 
-        # Scrape URLs collected (mostly for Amazon/Flipkart)
-        unique_urls_to_scrape = list(set(urls_to_scrape))
-        logger.info(f"Attempting to scrape {len(unique_urls_to_scrape)} unique URLs.")
-
-        # Limit scraping to avoid excessive requests
-        effective_scrape_limit = max(0, (max_results_per_platform * len(platforms)) - len(all_product_data))
-
-        if unique_urls_to_scrape and effective_scrape_limit > 0:
-            scraped_data = self.scrape_urls(unique_urls_to_scrape[:effective_scrape_limit])
-            all_product_data.extend(scraped_data)
-            # Ensure we don't exceed total limit
-            all_product_data = all_product_data[:(max_results_per_platform * len(platforms))]
-
-        logger.info(f"Collected {len(all_product_data)} product data entries in total for query '{query}'.")
-        return all_product_data
+        final_urls_to_scrape = list(unique_urls)
+        if not final_urls_to_scrape: logger.info("No relevant URLs found."); return []
+        logger.info(f"Found {len(final_urls_to_scrape)} unique URLs to scrape: {final_urls_to_scrape}")
+        parsed_products = self.scrape_and_parse_urls(final_urls_to_scrape, user_query)
+        logger.info(f"Total parsed products: {len(parsed_products)}")
+        return parsed_products
     
     def export_data(self, data: List[ProductData], format: str = "json", filename: str = None):
-        """Export scraped data to various formats"""
-        if not filename:
-            filename = f"scraped_data_{int(time.time())}"
-        
+        if not filename: filename = f"scraped_data_{int(time.time())}"
         if format.lower() == "json":
             with open(f"{filename}.json", 'w', encoding='utf-8') as f:
                 json.dump([product.__dict__ for product in data], f, indent=2, ensure_ascii=False)
-        
         elif format.lower() == "csv":
             import csv
             with open(f"{filename}.csv", 'w', newline='', encoding='utf-8') as f:
@@ -624,152 +522,127 @@ class ScraperPoolManager:
                     fieldnames = data[0].__dict__.keys()
                     writer = csv.DictWriter(f, fieldnames=fieldnames)
                     writer.writeheader()
-                    for product in data:
-                        writer.writerow(product.__dict__)
-        
+                    for product in data: writer.writerow(product.__dict__)
         logger.info(f"Data exported to {filename}.{format}")
 
-
 def format_products_as_text(products: List[ProductData]) -> str:
-    """
-    Format product data as readable text, ensuring essential fields are present.
-    """
-    if not products:
-        return "No products found."
-
+    if not products: return "No products found."
     valid_products = [p for p in products if p.title and p.product_url]
-    if not valid_products:
-        return "No valid product data to format."
-
+    if not valid_products: return "No valid product data to format."
     formatted_text = f"Found {len(valid_products)} products:\n\n"
-    
     for i, product in enumerate(valid_products, 1):
         formatted_text += f"--- Product {i} ---\n"
         formatted_text += f"Title: {product.title}\n"
-        
-        if product.price:
-            formatted_text += f"Price: {product.price}\n"
-        
+        if product.price: formatted_text += f"Price: {product.price}\n"
         if product.rating:
             formatted_text += f"Rating: {product.rating}"
-            if product.reviews_count and product.reviews_count != "0":
-                formatted_text += f" ({product.reviews_count} reviews)\n"
-            else:
-                formatted_text += "\n"
-        
-        if product.availability:
-            formatted_text += f"Availability: {product.availability}\n"
-        
-        if product.seller:
-            formatted_text += f"Seller: {product.seller}\n"
-
-        if product.platform:
-            formatted_text += f"Platform: {product.platform}\n"
-        
-        if product.product_url:
-            formatted_text += f"URL: {product.product_url}\n"
-        
-        if product.description:
-            formatted_text += f"Description: {product.description}\n"
-
+            if product.reviews_count and product.reviews_count != "0": formatted_text += f" ({product.reviews_count} reviews)\n"
+            else: formatted_text += "\n"
+        if product.availability: formatted_text += f"Availability: {product.availability}\n"
+        if product.seller: formatted_text += f"Seller: {product.seller}\n"
+        if product.platform: formatted_text += f"Platform: {product.platform}\n"
+        if product.product_url: formatted_text += f"URL: {product.product_url}\n"
+        if product.description: formatted_text += f"Description: {product.description}\n"
         formatted_text += "\n"
-    
     return formatted_text
 
-
-def fetch_product_information_tavily(query: str, platforms: Optional[List[str]] = None, max_results_per_platform: int = 3) -> str:
+def fetch_product_information_tavily(query: str, platforms: Optional[List[str]] = None, min_price: Optional[Union[int, float]] = None, max_price: Optional[Union[int, float]] = None, max_results_per_platform: int = 3) -> List[ProductData]:
     """
-    High-level function to fetch product information using Tavily and format it.
-    This is intended to be the primary function called by the router.
+    High-level function to fetch product information using Tavily, Firecrawl, and LLM parsing.
+    Returns a list of ProductData objects.
     """
     if not TAVILY_API_KEY:
-        logger.error("Tavily API key is not available. Cannot fetch product information.")
-        return "Error: Tavily API key not configured."
+        logger.error("Tavily API key is not available.")
+        return []
+    if not FIRECRAWL_API_KEY:
+        logger.error("Firecrawl API key is not available.")
+        return []
 
-    logger.info(f"Fetching product information for query: '{query}' using Tavily.")
-    manager = ScraperPoolManager(tavily_key=TAVILY_API_KEY)
+    logger.info(f"Fetching product information for query: '{query}', platforms: {platforms}, price_range: {min_price}-{max_price}")
+    manager = ScraperPoolManager(tavily_key=TAVILY_API_KEY, firecrawl_key=FIRECRAWL_API_KEY)
 
-    product_data_list = manager.search_and_optionally_scrape(
-        query,
-        platforms=platforms or ['general_shopping', 'amazon'],
-        max_results_per_platform=max_results_per_platform
+    target_platforms = platforms or ['amazon', 'flipkart', 'myntra']
+
+    product_data_list = manager.search_for_products_and_parse( # Corrected function name
+        user_query=query,
+        target_sites=target_platforms,
+        min_price=min_price,
+        max_price=max_price,
+        max_results_per_site=max_results_per_platform
     )
 
     if not product_data_list:
         logger.info(f"No product data found by ScraperPoolManager for query: '{query}'.")
-        return "No products found matching your query."
+        return []
 
-    formatted_text = format_products_as_text(product_data_list)
-    logger.info(f"Formatted product information for query: '{query}'. Length: {len(formatted_text)}")
-    return formatted_text
+    logger.info(f"Returning {len(product_data_list)} products for query: '{query}'.")
+    return product_data_list
 
-
-def search_products(query: str, platform: str = "general_shopping,amazon", max_results: int = 3) -> str:
+def search_products( # This function seems to be the main entry point for general searches now
+    query: str,
+    platform_str: str = "amazon,flipkart,myntra", # Retaining for compatibility if used elsewhere
+    min_price: Optional[Union[int, float]] = None,
+    max_price: Optional[Union[int, float]] = None,
+    max_results_per_platform: int = 3
+    ) -> List[ProductData]: # Ensure return type consistency
     """
-    Search for products using the query and return formatted results.
-    'platform' can be a comma-separated list of platforms like 'general_shopping,amazon'.
-    This function now primarily uses fetch_product_information_tavily.
-    The 'max_results' here means max_results_per_platform.
+    Search for products using the query and return a list of ProductData objects.
+    'platform_str' can be a comma-separated list of platforms.
+    This function directly calls fetch_product_information_tavily which is the core logic.
     """
-    logger.info(f"search_products called for query: '{query}', platform(s): '{platform}'")
+    logger.info(f"search_products called: query='{query}', platforms='{platform_str}', min_price={min_price}, max_price={max_price}")
 
-    platform_list = [p.strip().lower() for p in platform.split(',') if p.strip()]
-    if not platform_list:
-        platform_list = ['general_shopping', 'amazon']
+    platform_list = [p.strip().lower() for p in platform_str.split(',') if p.strip()]
+    if not platform_list: # Default to all supported sites if none specified or empty string
+        platform_list = ['amazon', 'flipkart', 'myntra']
 
-    return fetch_product_information_tavily(query, platforms=platform_list, max_results_per_platform=max_results)
+    # This function now directly calls the refined fetch_product_information_tavily
+    return fetch_product_information_tavily(
+        query=query,
+        platforms=platform_list,
+        min_price=min_price,
+        max_price=max_price,
+        max_results_per_platform=max_results_per_platform
+    )
 
-
-def scrape_website(query_or_url: str) -> str:
+def scrape_website(query_or_url: str) -> str: # This returns formatted text string
     """
-    Backward compatibility function.
-    If it's a URL, it tries to detect platform and scrape.
-    If it's a query, it uses the new search_products flow.
+    If it's a URL, it tries to detect platform, scrape with Firecrawl, parse with LLM, and format as text.
+    If it's a query, it uses the 'search_products' flow (which now returns List[ProductData]) and formats as text.
     """
+    manager = ScraperPoolManager(tavily_key=TAVILY_API_KEY, firecrawl_key=FIRECRAWL_API_KEY)
     parsed_url = urlparse(query_or_url)
-    if parsed_url.scheme and parsed_url.netloc:
-        logger.info(f"scrape_website called with URL: {query_or_url}. Attempting direct scrape.")
-        if not TAVILY_API_KEY:
-            logger.error("Tavily API key is not available. Cannot initialize ScraperPoolManager for direct scraping.")
-            return "Error: Tavily API key not configured for scraping."
-        manager = ScraperPoolManager(tavily_key=TAVILY_API_KEY)
-        # Note: scrape_urls expects a list of URLs.
-        product_data = manager.scrape_urls([query_or_url])
-        return format_products_as_text(product_data)
-    else:
-        logger.info(f"scrape_website called with query: {query_or_url}. Using new search_products.")
-        return search_products(query_or_url)  # platform and max_results will use defaults
 
+    if parsed_url.scheme and parsed_url.netloc: # It's a URL
+        logger.info(f"scrape_website called with URL: {query_or_url}. Attempting direct scrape and parse.")
+        if not manager.firecrawl_client:
+            return "Error: Firecrawl client not configured for scraping."
 
+        product_data_list = manager.scrape_and_parse_urls(
+            [query_or_url],
+            user_query=f"details for product at {query_or_url}" # Generic query for direct URL
+        )
+        return format_products_as_text(product_data_list)
+    else: # It's a search query
+        logger.info(f"scrape_website called with query: {query_or_url}. Using search_products flow.")
+        # search_products now returns List[ProductData]
+        # We need to pass platform_str, min_price, max_price if they are meant to be used here.
+        # For simplicity, using defaults for search_products if not provided to scrape_website.
+        product_data_list = search_products(query=query_or_url)
+        return format_products_as_text(product_data_list)
+
+# Compatibility functions - these might not be needed if frontend/routers directly use the new functions
 def extract_body_content(html_content: str) -> str:
-    """
-    Extract body content from HTML (for compatibility)
-    """
     soup = BeautifulSoup(html_content, 'html.parser')
     body = soup.find('body')
     return body.get_text() if body else ""
 
-
 def clean_body_content(content: str) -> str:
-    """
-    Clean content (for compatibility)
-    """
-    # Remove excessive whitespace and newlines
     cleaned = ' '.join(content.split())
     return cleaned
 
-
 def split_dom_content(content: str, max_length: int = 6000) -> List[str]:
-    """
-    Split content into chunks (for compatibility)
-    """
-    if len(content) <= max_length:
-        return [content]
-    
+    if len(content) <= max_length: return [content]
     chunks = []
-    for i in range(0, len(content), max_length):
-        chunks.append(content[i:i + max_length])
-    
+    for i in range(0, len(content), max_length): chunks.append(content[i:i + max_length])
     return chunks
-
-
