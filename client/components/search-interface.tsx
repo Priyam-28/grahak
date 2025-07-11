@@ -36,66 +36,11 @@ export function SearchInterface() {
   const abortControllerRef = useRef<AbortController | null>(null)
   const [currentSearchTopic, setCurrentSearchTopic] = useState<string>("") // To store the topic of the current search
 
-  // New state for super search
-  const [selectedSites, setSelectedSites] = useState<string[]>(() => {
-    if (typeof window !== "undefined") {
-      const savedSites = localStorage.getItem("selectedSites")
-      return savedSites ? JSON.parse(savedSites) : ["amazon"] // Default to Amazon
-    }
-    return ["amazon"]
-  })
-  const [minPrice, setMinPrice] = useState<string>(() => {
-    if (typeof window !== "undefined") {
-      return localStorage.getItem("minPrice") || ""
-    }
-    return ""
-  })
-  const [maxPrice, setMaxPrice] = useState<string>(() => {
-    if (typeof window !== "undefined") {
-      return localStorage.getItem("maxPrice") || ""
-    }
-    return ""
-  })
-
-
   // Removed handleSearchSubmit as the initial search step is gone
 
   const handleVoiceTranscript = (transcript: string) => {
     setQuery(transcript) // Voice input directly sets the main query
   }
-
-  // Effect for loading from localStorage on mount
-  useEffect(() => {
-    const savedQuery = localStorage.getItem("searchQuery")
-    if (savedQuery) setQuery(savedQuery)
-
-    const savedSites = localStorage.getItem("selectedSites")
-    if (savedSites) setSelectedSites(JSON.parse(savedSites))
-
-    const savedMinPrice = localStorage.getItem("minPrice")
-    if (savedMinPrice) setMinPrice(savedMinPrice)
-
-    const savedMaxPrice = localStorage.getItem("maxPrice")
-    if (savedMaxPrice) setMaxPrice(savedMaxPrice)
-  }, [])
-
-  // Effect for saving to localStorage when values change
-  useEffect(() => {
-    localStorage.setItem("searchQuery", query)
-  }, [query])
-
-  useEffect(() => {
-    localStorage.setItem("selectedSites", JSON.stringify(selectedSites))
-  }, [selectedSites])
-
-  useEffect(() => {
-    localStorage.setItem("minPrice", minPrice)
-  }, [minPrice])
-
-  useEffect(() => {
-    localStorage.setItem("maxPrice", maxPrice)
-  }, [maxPrice])
-
 
   const handleQuerySubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -123,57 +68,42 @@ export function SearchInterface() {
 
     abortControllerRef.current = new AbortController()
 
-    // Construct query parameters for the new API
-    const apiParams = new URLSearchParams({
-      query: currentQueryForRequest,
-    });
-    selectedSites.forEach(site => apiParams.append("sites", site));
-    if (minPrice) apiParams.append("min_price", minPrice);
-    if (maxPrice) apiParams.append("max_price", maxPrice);
-    // apiParams.append("max_results_per_site", "3"); // Defaulting to 3, or make it configurable
-
     try {
-      // const requestBody = { // Not needed for GET usually, but if API changes to POST
-      //   query: currentQueryForRequest,
-      //   sites: selectedSites,
-      //   min_price: minPrice ? parseFloat(minPrice) : undefined,
-      //   max_price: maxPrice ? parseFloat(maxPrice) : undefined,
-      //   max_results_per_site: 3 // Or make this configurable
-      // }
+      const requestBody = {
+        messages: newSearchTopic ? [userMessage] : [...messages, userMessage], // Send only current user message if new topic
+        query: currentQueryForRequest, // Use the actual query submitted
+        voice_enabled: voiceEnabled,
+        voice_id: selectedVoice,
+      }
 
-      const response = await fetch(`http://localhost:8000/api/v1/super-search/products?${apiParams.toString()}`, {
-        method: "GET", // Changed to GET as per new API design for queries
+      const response = await fetch("http://localhost:8000/api/v1/findproduct/chat", {
+        method: "POST",
         headers: {
-          "Content-Type": "application/json", // Still good practice, though GET has no body
+          "Content-Type": "application/json",
         },
-        // body: JSON.stringify(requestBody), // No body for GET
+        body: JSON.stringify(requestBody),
         signal: abortControllerRef.current.signal,
       })
 
       if (!response.ok) {
-        // Try to parse error from FastAPI
-        const errorData = await response.json().catch(() => null);
-        const detail = errorData?.detail || `HTTP error! status: ${response.status}`;
-        throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+        throw new Error(`HTTP error! status: ${response.status}`)
       }
 
-      const productsData: ProductCardData[] = await response.json()
+      const data = await response.json()
 
-      // Create a simple assistant message.
-      // The new API directly returns product list or error. No separate llm_summary or audio.
-      let assistantContent = "Here are the products I found based on your criteria:"
-      if (!productsData || productsData.length === 0) {
-        assistantContent = "I couldn't find any products matching your criteria. Please try adjusting your search."
+      if (data.success) {
+        const assistantMessage: Message = {
+          role: "assistant",
+          content: data.llm_summary || "I found some products, but couldn't generate a summary.", // Use llm_summary
+          products: data.products || [], // Store the products array
+          audio: data.audio || undefined, // Assuming audio might still be part of the response
+        }
+        setMessages((prev) => [...prev, assistantMessage])
+      } else {
+        // Use data.llm_summary as error message if available, else data.message
+        const serverErrorMessage = data.llm_summary || data.message || "Failed to find products";
+        throw new Error(serverErrorMessage)
       }
-
-      const assistantMessage: Message = {
-        role: "assistant",
-        content: assistantContent,
-        products: productsData || [],
-        // audio: undefined, // No audio from this endpoint
-      }
-      setMessages((prev) => [...prev, assistantMessage])
-
     } catch (error: any) {
       if (error.name === "AbortError") {
         console.log("Request was aborted")
@@ -356,83 +286,28 @@ export function SearchInterface() {
                 What product are you looking for?
               </CardTitle>
             </CardHeader>
-            <CardContent className="p-4 space-y-4">
-              <form onSubmit={handleQuerySubmit} className="space-y-4">
-                <div className="flex gap-3">
-                  <Input
-                    placeholder="e.g., best wireless headphones under $100, red running shoes size 10"
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    className="flex-grow glass-card border-primary/30 focus:border-primary focus:ring-primary/20 text-base py-3 px-4"
-                    disabled={loading}
-                    required
-                  />
-                  <VoiceInput
-                    onTranscript={handleVoiceTranscript}
-                    disabled={loading}
-                    className="glass-card border-primary/30"
-                  />
-                </div>
-
-                {/* Site Selection Checkboxes */}
-                <div className="space-y-2">
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Select Sites:</label>
-                  <div className="flex flex-wrap gap-x-4 gap-y-2">
-                    {["amazon", "flipkart", "myntra"].map((site) => (
-                      <label key={site} className="flex items-center space-x-2 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          className="form-checkbox h-5 w-5 text-primary-600 border-gray-300 rounded focus:ring-primary-500 dark:border-gray-600 dark:bg-gray-700 dark:focus:ring-offset-gray-800"
-                          checked={selectedSites.includes(site)}
-                          onChange={() => {
-                            setSelectedSites(prev =>
-                              prev.includes(site) ? prev.filter(s => s !== site) : [...prev, site]
-                            )
-                          }}
-                          disabled={loading}
-                        />
-                        <span className="text-sm text-gray-700 dark:text-gray-200 capitalize">{site}</span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Price Range Inputs */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="space-y-1">
-                    <label htmlFor="minPrice" className="block text-sm font-medium text-gray-700 dark:text-gray-300">Min Price (INR):</label>
-                    <Input
-                      id="minPrice"
-                      type="number"
-                      placeholder="e.g., 1000"
-                      value={minPrice}
-                      onChange={(e) => setMinPrice(e.target.value)}
-                      className="glass-card border-primary/30 focus:border-primary focus:ring-primary/20"
-                      disabled={loading}
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <label htmlFor="maxPrice" className="block text-sm font-medium text-gray-700 dark:text-gray-300">Max Price (INR):</label>
-                    <Input
-                      id="maxPrice"
-                      type="number"
-                      placeholder="e.g., 5000"
-                      value={maxPrice}
-                      onChange={(e) => setMaxPrice(e.target.value)}
-                      className="glass-card border-primary/30 focus:border-primary focus:ring-primary/20"
-                      disabled={loading}
-                    />
-                  </div>
-                </div>
-
+            <CardContent className="p-4">
+              <form onSubmit={handleQuerySubmit} className="flex gap-3">
+                <Input
+                  placeholder="e.g., best wireless headphones under $100, red running shoes size 10"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  className="glass-card border-primary/30 focus:border-primary focus:ring-primary/20 text-base py-3 px-4" // Adjusted padding/text size
+                  disabled={loading}
+                  required // Make initial search query required
+                />
+                <VoiceInput
+                  onTranscript={handleVoiceTranscript}
+                  disabled={loading}
+                  className="glass-card border-primary/30"
+                />
                 <Button
                   type="submit"
-                  disabled={loading || !query.trim() || selectedSites.length === 0}
-                  className="w-full gradient-primary glow-primary hover-lift px-6 py-3 text-base"
-                  size="lg"
+                  disabled={loading || !query.trim()}
+                  className="gradient-primary glow-primary hover-lift px-6"
+                  size="lg" // Make button a bit larger to match input height better
                 >
-                  {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Search className="w-5 h-5 mr-2" />}
-                  {loading ? "Searching..." : "Find Products"}
+                  {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
                 </Button>
               </form>
             </CardContent>

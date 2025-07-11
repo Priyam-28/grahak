@@ -7,7 +7,6 @@ import logging
 import asyncio
 from dotenv import load_dotenv # Added for .env loading
 from routers.findproduct import router as findproduct_router
-from server.routers import super_search # Added new router import
 
 # Load environment variables from .env file
 load_dotenv()
@@ -29,7 +28,6 @@ app.add_middleware(
 
 # Include routers
 app.include_router(findproduct_router, prefix="/api/v1")
-app.include_router(super_search.router, prefix="/api/v1", tags=["Super Search"]) # Added new router
 
 @app.get("/")
 async def root():
