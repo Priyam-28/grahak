@@ -42,3 +42,5 @@ server/instance/
 .env
 .gitignore
 .DS_Store
+
+test/server/node_modules
